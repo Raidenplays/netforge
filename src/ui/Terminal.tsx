@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import type { Device } from '../model/types';
-import { complete, exec, newSession, prompt, type Session } from '../engine/ios';
+import { complete, exec, help, isSecretInput, newSession, prompt, startSession, type Session } from '../engine/ios';
 import { HOST_CMDS, hostExec, hostPrompt } from '../engine/hostcli';
 
 interface Buf {
@@ -15,7 +15,7 @@ const buffers = new Map<string, Buf>();
 function bufFor(d: Device): Buf {
   let b = buffers.get(d.id);
   if (!b) {
-    b = { lines: [], session: newSession(), hist: [] };
+    b = { lines: [], session: d.ios ? startSession(d) : newSession(), hist: [] };
     if (d.ios)
       b.lines.push({
         t: `${d.model} emulated by NetForge\nIOS-style CLI · abbreviations (conf t, int g0/0, sh ip int br), Tab completion and ? help work\n\nPress RETURN to get started!\n\n`,
@@ -50,9 +50,12 @@ export function Terminal({ dev }: { dev: Device }) {
     setHi(null);
   }, [dev.id]);
 
+  const secret = ios && isSecretInput(b.session);
+
   const run = (line: string) => {
-    b.lines.push({ t: pr + line + '\n', c: 'cmd' });
-    if (line.trim()) b.hist.push(line);
+    // password prompts don't echo what was typed
+    b.lines.push({ t: pr + (secret ? '' : line) + '\n', c: 'cmd' });
+    if (line.trim() && !secret && !(ios && b.session.pending)) b.hist.push(line);
     let res = '';
     mutate((p) => {
       const d = p.devices.find((x) => x.id === dev.id);
@@ -60,7 +63,7 @@ export function Terminal({ dev }: { dev: Device }) {
       res = ios ? exec(p, d, b.session, line) : hostExec(p, d, line);
     });
     if (res === '\f') b.lines = [];
-    else if (res) b.lines.push({ t: res, c: res.includes('% Invalid') || res.includes('% Incomplete') || res.includes('% Ambiguous') ? 'err' : undefined });
+    else if (res) b.lines.push({ t: res, c: /^% |\n% /.test(res) && !res.includes('%SYS') && !res.includes('%LINK') ? 'err' : undefined });
     if (b.lines.length > 600) b.lines = b.lines.slice(-400);
     setInput('');
     setHi(null);
@@ -101,9 +104,13 @@ export function Terminal({ dev }: { dev: Device }) {
     } else if (e.key === 'z' && e.ctrlKey && ios) {
       e.preventDefault();
       run('end');
-    } else if (e.key === '?' && ios) {
+    } else if (e.key === '?' && ios && !b.session.pending) {
+      // IOS help: show what can come next, then give the line back
       e.preventDefault();
-      run(input + '?');
+      b.lines.push({ t: pr + input + '?\n', c: 'cmd' });
+      const res = help(dev, b.session, input);
+      if (res) b.lines.push({ t: res, c: res.includes('% ') ? 'err' : undefined });
+      force((n) => n + 1);
     }
   };
 
@@ -120,6 +127,7 @@ export function Terminal({ dev }: { dev: Device }) {
         <span>{pr}</span>
         <input
           ref={inp}
+          type={secret ? 'password' : 'text'}
           value={input}
           spellCheck={false}
           autoComplete="off"

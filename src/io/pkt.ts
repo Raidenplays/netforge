@@ -6,7 +6,7 @@ import { emptyIos } from '../model/catalog';
 import { randomMac } from '../model/ip';
 import type { Activity, CableType, Device, DeviceKind, GradeItem, Iface, Link, Media, Project } from '../model/types';
 import { uid } from '../model/types';
-import { parseRunningConfig, runningConfig } from '../engine/ios';
+import { parseRunningConfig, runningConfigForPkt } from '../engine/ios';
 
 const KIND: Record<string, DeviceKind> = {
   Router: 'router',
@@ -103,6 +103,13 @@ function collectPorts(mod: Element | null, path: number[] = [], out: RawPort[] =
   kids(mod, 'PORT').forEach((el, index) => out.push({ el, type: txt(el, 'TYPE'), path, index }));
   kids(mod, 'SLOT').forEach((slot, si) => kids(slot, 'MODULE').forEach((m) => collectPorts(m, [...path, si], out)));
   return out;
+}
+
+/** the VLANS element of the device's flash:vlan.dat, if it has one */
+function vlanDat(engine: Element): Element | null {
+  for (const fc of Array.from(engine.getElementsByTagName('FILE_CONTENT')))
+    if (fc.getAttribute('class') === 'CVlanDatFileContent') return kid(fc, 'VLANS');
+  return null;
 }
 
 function configLines(engine: Element, tag: string) {
@@ -239,6 +246,10 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
     if (kind === 'router' || kind === 'switch') {
       if (cfg.length) parseRunningConfig(cfg.join('\n'), d);
       else d.ios = emptyIos(name);
+      const vdat = vlanDat(engine!);
+      if (vdat) d.ios!.vlans = Array.from(vdat.getElementsByTagName('VLAN')).map((v) => ({ id: Number(v.getAttribute('number')), name: v.getAttribute('name') ?? '' }));
+      const startup = configLines(engine!, 'STARTUPCONFIG');
+      if (startup.length) d.ios!.startup = startup.join('\n');
       if (kind === 'switch' && !d.ifaces.some((i) => i.name === 'Vlan1'))
         d.ifaces.push({ name: 'Vlan1', media: 'virtual', speed: 0, mac: randomMac(), shutdown: true });
     } else if (kind === 'homerouter') {
@@ -336,11 +347,11 @@ export interface ExportReport {
   notExported: string[];
 }
 
-function setConfig(doc: Document, engine: Element, tag: string, text: string) {
+function setConfig(doc: Document, engine: Element, tag: string, lines: string[]) {
   const el = kid(engine, tag);
   if (!el) return;
   while (el.firstChild) el.removeChild(el.firstChild);
-  for (const line of text.split('\n')) {
+  for (const line of lines) {
     el.appendChild(doc.createTextNode('\n'));
     const l = doc.createElement('LINE');
     l.textContent = line;
@@ -387,9 +398,24 @@ export function exportPkt(p: Project): ExportReport {
     });
 
     if (d.ios) {
-      const cfg = runningConfig(d);
+      const cfg = runningConfigForPkt(d);
       setConfig(doc, engine, 'RUNNINGCONFIG', cfg);
-      setConfig(doc, engine, 'STARTUPCONFIG', cfg);
+      // keep a saved startup-config as it was; otherwise save the running one, as before
+      setConfig(doc, engine, 'STARTUPCONFIG', d.ios.startup !== undefined ? d.ios.startup.split('\n') : cfg);
+      const vdat = vlanDat(engine);
+      if (vdat && d.ios.vlans) {
+        const rspan = new Map(Array.from(vdat.getElementsByTagName('VLAN')).map((v) => [v.getAttribute('number'), v.getAttribute('rspan') ?? '0']));
+        while (vdat.firstChild) vdat.removeChild(vdat.firstChild);
+        for (const v of d.ios.vlans) {
+          vdat.appendChild(doc.createTextNode('\n'));
+          const e = doc.createElement('VLAN');
+          e.setAttribute('rspan', rspan.get(String(v.id)) ?? '0');
+          e.setAttribute('number', String(v.id));
+          e.setAttribute('name', v.name);
+          vdat.appendChild(e);
+        }
+        setTxt(vdat.parentElement, 'VLAN_COUNT', String(d.ios.vlans.length));
+      }
     } else if (d.home) {
       const h = d.home;
       setTxt(engine, 'LAN_IP_ADDRESS', h.lanIp);

@@ -23,13 +23,13 @@ simulation mode) and wraps them in an interface that feels like a current app:
 | Area | Supported |
 | --- | --- |
 | Devices | Routers (1941, 2911, 4331, incl. EHWIC switch ports), switches (2960, 3650, Switch-PT), PCs, laptops, servers, printers, tablets, phones, access points, Linksys-style home Wi-Fi routers. Cell towers and central office servers are shown but not simulated |
-| Layer 2 | Cables, switching / bridging, Wi-Fi association by SSID and range |
-| Layer 3 | Static IPs, default gateways, connected and static routes (longest-prefix match), switch SVIs |
+| Layer 2 | Cables, switching / bridging, VLANs (access ports, 802.1Q trunks with native and allowed VLANs, DTP-style trunk negotiation), Wi-Fi association by SSID and range |
+| Layer 3 | Static IPs, default gateways, connected and static routes (longest-prefix match), switch SVIs, router-on-a-stick subinterfaces (`encapsulation dot1Q`) |
 | Services | DHCP (IOS pools, excluded addresses, home-router DHCP, Server-PT DHCP service, `ip helper-address` relay), NAT overload (IOS `ip nat inside/outside`, home routers) |
-| IOS CLI | `enable`, `configure terminal`, `interface` (incl. `range`), `ip address`, `shutdown`, `hostname`, `ip route`, `ip dhcp pool`, `ip nat`, `show running-config`, `show ip interface brief`, `show ip route`, `show interfaces`, `show ip dhcp binding`, `show vlan brief`, `ping`, `traceroute`, `do`, `copy run start`… with abbreviations (`conf t`, `int g0/0`, `sh ip int br`), Tab completion, `?` and history |
+| IOS CLI | A command grammar per mode (exec, global, interface/subinterface, line, router, DHCP pool, VLAN) with IOS behaviour: abbreviations, `?` context help, Tab completion, `% Invalid input` with the caret under the bad word, `% Incomplete` / `% Ambiguous`, `no` and `do` forms, and config stored in full (`sw mo acc` → `switchport mode access`). Covers device basics (`hostname`, `enable secret`/`password`, `line con/vty` with `password` + `login` / `login local`, `service password-encryption`, `banner motd`, `username`), SSH setup (`ip domain-name`, `crypto key generate rsa`, `ip ssh version`, `transport input`), interfaces, IPv4/IPv6 addressing, static routes, DHCP, NAT, VLANs and trunks, and saving (`copy run start`, `write`, `erase startup-config`, `reload`). Password prompts, console login and the `.!!!!` first ping work like the real thing. Hashes match Packet Tracer's, so `enable secret class` produces the same line a .pkt has |
 | Host prompt | `ipconfig [/all /renew /release]`, `ping [-n]`, `tracert` |
 
-Not yet: VLAN trunking, dynamic routing protocols (RIP/OSPF/EIGRP commands are accepted and saved but not run), ACL enforcement, IPv6, and servers' HTTP/DNS/email services.
+Not yet: dynamic routing protocols (RIP/OSPF/EIGRP commands are accepted and saved but not run), ACL enforcement, IPv6 forwarding (addresses are configured and shown, not routed), SSH/Telnet sessions between devices, and servers' HTTP/DNS/email services.
 
 ## Activities (.pka)
 
@@ -44,17 +44,19 @@ It's an estimate: Packet Tracer's own Check Results is what counts for coursewor
 ## Packet Tracer files
 
 NetForge opens `.pkt` and `.pka` files from Packet Tracer 5.0 and later (tested with 8.1, 8.2 and 9.0).
-Device positions, names, interfaces, IP settings, IOS running-configs, home-router settings and
-cables are imported. Anything NetForge doesn't model is preserved untouched.
+Device positions, names, interfaces, IP settings, IOS running- and startup-configs, switch VLAN
+databases (`vlan.dat`), home-router settings and cables are imported. Anything NetForge doesn't model is preserved untouched.
 
 **Export .pkt** writes your changes back into the original file: names, positions, IP settings,
-running and startup configs, home-router settings and cables. Devices you *added* in NetForge
+running and startup configs, VLAN databases, home-router settings and cables. Devices you *added* in NetForge
 can't be written into a Packet Tracer file yet. Save as `.netforge` to keep everything.
 
 The file format is documented in [docs/PKT_FORMAT.md](docs/PKT_FORMAT.md). It was implemented
 clean-room for interoperability, from the publicly documented research in
-[pka2xml](https://github.com/mircodz/pka2xml) (BSD-2-Clause). No Cisco code or binaries were
-decompiled or used. The codec is its own crate in [`crates/pktcodec`](crates/pktcodec) with a
+[pka2xml](https://github.com/mircodz/pka2xml) (BSD-2-Clause). No Cisco code was copied and nothing
+was decompiled. CLI behaviour (command syntax, prompts, error messages, config layout) was checked
+against Packet Tracer's own documentation, the sample networks it ships with and what it prints, and
+the CLI code is NetForge's own. The codec is its own crate in [`crates/pktcodec`](crates/pktcodec) with a
 small CLI:
 
 ```sh
@@ -87,7 +89,8 @@ npm run tauri build     # build installers into src-tauri/target/release/bundle
 
 `npm run dev` runs the UI alone in a browser for quick UI work (opening `.pkt` files needs the desktop app).
 
-Tests: `npm test` (engine, CLI, import/export; set `PKT_XML=path/to/lab.xml` to also run against a real lab) and `cargo test --manifest-path crates/pktcodec/Cargo.toml` (set `PKT_SAMPLE=lab.pkt` for a real file).
+Tests: `npm test` (engine, CLI, import/export; set `PKT_XML=path/to/lab.xml` to also run against a real lab,
+or `NETFORGE_CORPUS=dir` to sweep a folder of decoded `.pkt` XML, such as Packet Tracer's bundled samples) and `cargo test --manifest-path crates/pktcodec/Cargo.toml` (set `PKT_SAMPLE=lab.pkt` for a real file).
 
 ## Keyboard shortcuts
 

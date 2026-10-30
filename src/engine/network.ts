@@ -79,7 +79,25 @@ export function buildTopo(p: Project): Topo {
 
   const wireless = wirelessLinks(p);
   const upLinks = new Set<string>();
-  for (const l of [...p.links, ...wireless]) {
+  const allLinks = [...p.links, ...wireless];
+
+  // VLANs: switch ports are untagged members of one VLAN, trunks carry a tagged node per VLAN
+  const vlanIds = projectVlans(p);
+  const trunk = trunkPorts(p, devs);
+  const tagged = (d: Device, i: Iface): Map<number, string> => {
+    const out = new Map<number, string>();
+    if (d.kind === 'switch' && trunk.has(node(d.id, i.name))) {
+      const allowed = allowedOf(i);
+      const db = d.ios?.vlans?.map((v) => v.id);
+      for (const v of vlanIds) if ((allowed === 'all' || allowed.includes(v)) && (!db || db.includes(v)) && v !== (i.nativeVlan ?? 1)) out.set(v, `${node(d.id, i.name)}#${v}`);
+    } else if (d.kind === 'router') {
+      for (const sub of d.ifaces)
+        if (sub.dot1q !== undefined && !sub.shutdown && sub.name.startsWith(i.name + '.') && !sub.extra?.includes('encapsulation-native')) out.set(sub.dot1q, node(d.id, sub.name));
+    }
+    return out;
+  };
+
+  for (const l of allLinks) {
     const da = devs.get(l.a.dev);
     const db = devs.get(l.b.dev);
     const ia = ifaceOf(da, l.a.iface);
@@ -88,13 +106,41 @@ export function buildTopo(p: Project): Topo {
     if (!da.powered || !db.powered || ia.shutdown || ib.shutdown) continue;
     upLinks.add(l.id);
     union(node(da.id, ia.name), node(db.id, ib.name), l.id);
+    const ta = tagged(da, ia);
+    const tb = tagged(db, ib);
+    for (const [v, n] of ta) if (tb.has(v)) union(n, tb.get(v)!, l.id);
   }
 
   // bridging devices
   for (const d of p.devices) {
     if (!d.powered) continue;
-    if (d.kind === 'switch' || d.kind === 'ap') {
-      const ports = d.ifaces.filter((i) => !i.shutdown && (i.media !== 'virtual' || i.name.startsWith('Vlan')));
+    if (d.kind === 'switch') {
+      const members = new Map<number, string[]>();
+      const add = (v: number, n: string) => (members.get(v) ?? members.set(v, []).get(v)!).push(n);
+      for (const i of d.ifaces) {
+        if (i.shutdown || i.media === 'wireless') continue;
+        if (i.media === 'virtual') {
+          const m = i.name.match(/^Vlan(\d+)$/);
+          if (m) add(Number(m[1]), node(d.id, i.name));
+          continue;
+        }
+        const n = node(d.id, i.name);
+        if (trunk.has(n)) {
+          const allowed = allowedOf(i);
+          const nv = i.nativeVlan ?? 1;
+          if (allowed === 'all' || allowed.includes(nv)) add(nv, n);
+          for (const [v, tn] of tagged(d, i)) add(v, tn);
+        } else add(i.accessVlan ?? 1, n);
+      }
+      for (const ns of members.values()) for (let k = 1; k < ns.length; k++) union(ns[0], ns[k]);
+    }
+    if (d.kind === 'router') {
+      // a "native" subinterface takes the parent's untagged frames
+      for (const sub of d.ifaces)
+        if (sub.dot1q !== undefined && !sub.shutdown && sub.extra?.includes('encapsulation-native')) union(node(d.id, sub.name), node(d.id, sub.name.split('.')[0]));
+    }
+    if (d.kind === 'ap') {
+      const ports = d.ifaces.filter((i) => !i.shutdown);
       for (let k = 1; k < ports.length; k++) union(node(d.id, ports[0].name), node(d.id, ports[k].name));
     }
     if (d.kind === 'router') {
@@ -110,7 +156,14 @@ export function buildTopo(p: Project): Topo {
   }
 
   const endpoints: Endpoint[] = [];
-  const linkUp = (d: Device, i: Iface) =>
+  const linkUp = (d: Device, i: Iface): boolean => {
+    if (i.dot1q !== undefined || (d.kind === 'router' && i.name.includes('.'))) {
+      const parent = ifaceOf(d, i.name.split('.')[0]);
+      return !!parent && !parent.shutdown && linkUp(d, parent);
+    }
+    return linkUpRaw(d, i);
+  };
+  const linkUpRaw = (d: Device, i: Iface) =>
     i.media === 'virtual' ||
     [...p.links, ...wireless].some(
       (l) => upLinks.has(l.id) && ((l.a.dev === d.id && l.a.iface === i.name) || (l.b.dev === d.id && l.b.iface === i.name)),
@@ -134,6 +187,52 @@ export function buildTopo(p: Project): Topo {
   for (const e of endpoints) find(e.node);
 
   return { devs, links: p.links, wireless, upLinks, parent, adj, endpoints };
+}
+
+/** every VLAN id mentioned anywhere in the project */
+function projectVlans(p: Project): number[] {
+  const s = new Set<number>([1]);
+  for (const d of p.devices) {
+    for (const v of d.ios?.vlans ?? []) if (v.id < 1002) s.add(v.id);
+    for (const i of d.ifaces) {
+      if (i.accessVlan) s.add(i.accessVlan);
+      if (i.nativeVlan) s.add(i.nativeVlan);
+      if (i.dot1q !== undefined) s.add(i.dot1q);
+      const m = i.name.match(/^Vlan(\d+)$/);
+      if (m) s.add(Number(m[1]));
+    }
+  }
+  return [...s].sort((a, b) => a - b);
+}
+
+function allowedOf(i: Iface): number[] | 'all' {
+  if (!i.allowedVlans || i.allowedVlans === 'all') return 'all';
+  if (i.allowedVlans === 'none') return [];
+  const out: number[] = [];
+  for (const part of i.allowedVlans.split(',')) {
+    const [a, b] = part.split('-').map(Number);
+    for (let v = a; v <= (b ?? a); v++) out.push(v);
+  }
+  return out;
+}
+
+/**
+ * Switch ports that end up trunking: `switchport mode trunk`, or a port left in the default
+ * dynamic mode whose neighbour is a configured trunk (DTP negotiates a trunk, as in Packet Tracer).
+ */
+function trunkPorts(p: Project, devs: Map<string, Device>): Set<string> {
+  const out = new Set<string>();
+  for (const d of p.devices) if (d.kind === 'switch') for (const i of d.ifaces) if (i.swMode === 'trunk') out.add(node(d.id, i.name));
+  for (const l of p.links) {
+    const da = devs.get(l.a.dev);
+    const db = devs.get(l.b.dev);
+    const ia = ifaceOf(da, l.a.iface);
+    const ib = ifaceOf(db, l.b.iface);
+    if (!da || !db || !ia || !ib || da.kind !== 'switch' || db.kind !== 'switch') continue;
+    if (ia.swMode === 'trunk' && ib.swMode === undefined) out.add(node(db.id, ib.name));
+    if (ib.swMode === 'trunk' && ia.swMode === undefined) out.add(node(da.id, ia.name));
+  }
+  return out;
 }
 
 export const segOf = (t: Topo, n: string) => {

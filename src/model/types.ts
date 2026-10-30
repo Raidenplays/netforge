@@ -27,6 +27,28 @@ export interface Iface {
   natRole?: 'inside' | 'outside';
   /** IOS lines inside this interface block we don't model, kept verbatim */
   extra?: string[];
+  /** switch ports: `switchport mode` (unset = dynamic auto, which acts as access here) */
+  swMode?: 'access' | 'trunk';
+  /** switch ports: access VLAN (default 1) */
+  accessVlan?: number;
+  /** trunk ports: native VLAN (default 1) */
+  nativeVlan?: number;
+  /** trunk ports: allowed VLAN list, e.g. "10,20,30-40" (unset = all) */
+  allowedVlans?: string;
+  /** router subinterfaces: `encapsulation dot1Q <id>` */
+  dot1q?: number;
+}
+
+export interface Vlan {
+  id: number;
+  name: string;
+}
+
+export interface LineCfg {
+  /** e.g. "con 0", "aux 0", "vty 0 4", "vty 5 15" */
+  name: string;
+  /** body lines, without leading space, e.g. "password cisco", "login" */
+  cmds: string[];
 }
 
 export interface StaticRoute {
@@ -58,6 +80,20 @@ export interface IosState {
   leases: DhcpLease[];
   natRules: string[];
   defaultGateway?: string;
+  /** enable password (plain, or `7 <hex>` once encrypted) */
+  enablePassword?: string;
+  /** service password-encryption */
+  pwEncrypt?: boolean;
+  /** VLAN database (switches); unset = just VLAN 1 */
+  vlans?: Vlan[];
+  /** line con/aux/vty blocks; unset = the device's defaults */
+  lines?: LineCfg[];
+  /** banner motd text (without delimiters) */
+  motd?: string;
+  /** RSA key size once `crypto key generate rsa` has run (keys aren't part of the config) */
+  rsaBits?: number;
+  /** saved startup-config text; unset = never saved (or as imported) */
+  startup?: string;
   /** global lines before the first interface we don't model */
   extraPre: string[];
   /** global lines after interfaces we don't model */
