@@ -8,6 +8,7 @@ import { buildTopo, ifaceStatus, renew } from '../engine/network';
 import { runningConfig } from '../engine/ios';
 import { classfulMask, isIp, isMask, maskToPrefix } from '../model/ip';
 import { isHost, templateFor } from '../model/catalog';
+import { isV6, linkLocal, normV6, splitPrefix } from '../model/ip6';
 
 /** Text input that commits on blur / Enter so each edit is one undo step. */
 function Commit({
@@ -272,6 +273,38 @@ function HostConfig({ dev, edit }: { dev: Device; edit: (fn: (d: Device, p: Proj
             <I.reset size={14} /> Renew lease
           </button>
         )}
+      </div>
+      <div className="section">
+        <h4>IPv6</h4>
+        <div className="radio-row segmented" style={{ display: 'inline-flex' }}>
+          {(['auto', 'dhcp', 'static'] as const).map((m) => (
+            <button key={m} className={(dev.v6Mode ?? 'static') === m ? 'on' : ''} onClick={() => edit((d) => ((d.v6Mode = m), m !== 'static' && (d.ifaces.find((x) => x.name === i.name)!.v6 = [])))}>
+              {m === 'auto' ? 'Auto config' : m === 'dhcp' ? 'DHCPv6' : 'Static'}
+            </button>
+          ))}
+        </div>
+        <div className="field">
+          <label>IPv6 address</label>
+          <Commit
+            value={i.v6?.[0] ? `${i.v6[0].addr}/${i.v6[0].len}` : ''}
+            disabled={(dev.v6Mode ?? 'static') !== 'static'}
+            validate={(v) => !!splitPrefix(v)}
+            placeholder="2001:DB8:ACAD:1::10/64"
+            onCommit={(v) => setIf((x) => (x.v6 = v ? [{ addr: splitPrefix(v)![0], len: splitPrefix(v)![1] }] : []))}
+          />
+        </div>
+        <div className="field">
+          <label>Link-local address</label>
+          <Commit value={i.v6ll ?? linkLocal(i.mac)} validate={isV6} onCommit={(v) => setIf((x) => (x.v6ll = v && normV6(v) !== linkLocal(x.mac) ? normV6(v) : undefined))} />
+        </div>
+        <div className="field">
+          <label>IPv6 gateway</label>
+          <Commit value={dev.gateway6 ?? ''} disabled={(dev.v6Mode ?? 'static') !== 'static'} validate={isV6} placeholder="FE80::1" onCommit={(v) => edit((d) => (d.gateway6 = v ? normV6(v) : ''))} />
+        </div>
+        <div className="field">
+          <label>IPv6 DNS server</label>
+          <Commit value={dev.dns6 ?? ''} validate={isV6} placeholder="2001:DB8::53" onCommit={(v) => edit((d) => (d.dns6 = v ? normV6(v) : ''))} />
+        </div>
       </div>
       {dev.dhcpService && (
         <div className="section">

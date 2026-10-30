@@ -5,6 +5,9 @@ import { caretError, Grammar, ifaceName, IF_TYPES, type CmdSpec, type ParsedArgs
 import { checkPassword, md5crypt, type7Encode } from './iospw';
 import { buildTopo, controlPlane, ifaceStatus, ping } from './network';
 import { ospfRouterId, protocolsOf } from './routing';
+import { endpoints6, showIpv6Route, v6Of } from './ipv6';
+import { isV6 } from '../model/ip6';
+import { segOf } from './network';
 import { aclAllows, clearAclHits, isExtendedNumber, isStandardNumber, parseAce, showAccessLists, type Ace } from './acl';
 
 /* ================================================================== */
@@ -282,7 +285,7 @@ export function loadConfig(d: Device, text: string | undefined) {
 /*  CLI session                                                        */
 /* ================================================================== */
 
-export type Mode = 'user' | 'priv' | 'config' | 'if' | 'pool' | 'line' | 'router' | 'vlan' | 'acl';
+export type Mode = 'user' | 'priv' | 'config' | 'if' | 'pool' | 'pool6' | 'line' | 'router' | 'vlan' | 'acl';
 
 type Pending =
   | { kind: 'press-return' }
@@ -359,6 +362,8 @@ export function prompt(d: Device, s: Session) {
       return isSubIf(s) ? `${h}(config-subif)#` : `${h}(config-if${s.iface && s.iface.length > 1 ? '-range' : ''})#`;
     case 'pool':
       return `${h}(dhcp-config)#`;
+    case 'pool6':
+      return `${h}(config-dhcpv6)#`;
     case 'line':
       return `${h}(config-line)#`;
     case 'router':
@@ -586,32 +591,18 @@ function ifState(p: Project, t: ReturnType<typeof buildTopo>, d: Device, i: Ifac
   return st.line ? ['up', 'up'] : ['down', 'down'];
 }
 
-function v6addrs(i: Iface) {
-  return (i.extra ?? []).map((e) => e.match(/^ipv6 address (\S+)(?: (link-local|eui-64))?$/)).filter((m): m is RegExpMatchArray => !!m && m[1] !== 'autoconfig' && m[1] !== 'dhcp');
-}
-
-function eui64LinkLocal(mac: string) {
-  const h = mac.replace(/[.:-]/g, '').toLowerCase();
-  const b = h.match(/../g)!.map((x) => parseInt(x, 16));
-  b[0] ^= 2;
-  const w = [b[0] << 8 | b[1], b[2] << 8 | 0xff, 0xfe << 8 | b[3], b[4] << 8 | b[5]];
-  return 'FE80::' + w.map((x) => x.toString(16).toUpperCase()).join(':');
-}
-
 function showIpv6IntBrief(p: Project, d: Device) {
   const t = buildTopo(p);
   const out: string[] = [];
   for (const i of d.ifaces) {
     if (i.media === 'wireless') continue;
     const [admin, line] = ifState(p, t, d, i);
-    out.push(pad(i.name, 26) + `[${admin === 'administratively down' ? 'administratively down' : admin}/${line}]`);
-    const addrs = v6addrs(i);
-    const ll = addrs.find((a) => a[2] === 'link-local')?.[1];
-    const enabled = addrs.length || (i.extra ?? []).some((e) => /^ipv6 (enable|address)/.test(e));
-    if (!enabled) out.push('    unassigned');
+    out.push(pad(i.name, 26) + `[${admin}/${line}]`);
+    const v = v6Of(d, i);
+    if (!v.enabled) out.push('    unassigned');
     else {
-      out.push(`    ${(ll ?? eui64LinkLocal(i.mac)).toUpperCase()}`);
-      for (const a of addrs) if (a[2] !== 'link-local') out.push(`    ${a[1].split('/')[0].toUpperCase()}`);
+      out.push(`    ${v.ll}`);
+      for (const a of v.globals) out.push(`    ${a.addr}`);
     }
   }
   return out.join('\n') + '\n';
@@ -799,10 +790,10 @@ function showInterfaces(p: Project, d: Device, only?: Iface) {
 }
 
 function iosPing(p: Project, d: Device, target: string) {
-  if (!isIp(target)) return `% Unrecognized host or address, or protocol not running.\n\n`;
+  if (!isIp(target) && !isV6(target)) return `% Unrecognized host or address, or protocol not running.\n\n`;
   const r = ping(p, d.id, target, { count: true });
   const seen = arpSeen.get(d.id) ?? arpSeen.set(d.id, new Set()).get(d.id)!;
-  const cold = r.ok && !seen.has(target);
+  const cold = r.ok && !seen.has(target) && isIp(target);
   if (r.ok) seen.add(target);
   const marks = r.ok ? (cold ? '.!!!!' : '!!!!!') : r.unreachFrom ? 'U.U.U' : '.....';
   const ok = r.ok ? (cold ? 4 : 5) : 0;
@@ -892,7 +883,7 @@ const store = (where: 'pre' | 'post') =>
 const ifStore = cmd((c, a) => {
   for (const i of curIfaces(c)) {
     const line = a.canonical;
-    const fam = line.split(' ').slice(0, line.startsWith('ipv6 address') || line.startsWith('ip helper') ? 99 : 2).join(' ');
+    const fam = line.startsWith('ipv6 ') || line.startsWith('ip helper') ? line : line.split(' ').slice(0, 2).join(' ');
     i.extra = (i.extra ?? []).filter((e) => (c.negate ? !e.startsWith(fam) && e !== line : !e.startsWith(fam + ' ') && e !== fam));
     if (!c.negate) i.extra.push(line);
   }
@@ -929,6 +920,18 @@ const showCmds = (priv: boolean): CmdSpec<Ctx>[] => {
     S('ip nat translations', () => 'Pro  Inside global     Inside local       Outside local      Outside global\n'),
     S('ip ssh', (c) => (c.ios.rsaBits ? `SSH Enabled - version ${c.ios.extraPre.includes('ip ssh version 2') || c.ios.extraPost.includes('ip ssh version 2') ? '2.0' : '1.99'}\nAuthentication timeout: 120 secs; Authentication retries: 3\n` : '%SSH has not been enabled\n')),
     S('ipv6 interface brief', (c) => showIpv6IntBrief(c.p, c.d)),
+    S('ipv6 route', (c) => showIpv6Route(c.p, c.d)),
+    S('ipv6 neighbors', (c) => {
+      const t = buildTopo(c.p);
+      const eps = endpoints6(c.p, t);
+      const mine = eps.filter((e) => e.dev.id === c.d.id);
+      const rows = ['IPv6 Address                              Age Link-layer Addr State Interface'];
+      for (const m of mine)
+        for (const o of eps)
+          if (o.dev.id !== c.d.id && segOf(t, o.node) === segOf(t, m.node))
+            rows.push(`${pad(o.ll, 42)}${pad('0', 4)}${pad(o.dev.ifaces.find((i) => i.name === o.iface)?.mac ?? '', 15)}${pad('REACH', 6)}${m.iface}`);
+      return rows.join('\n') + '\n';
+    }),
     S('interfaces', (c) => showInterfaces(c.p, c.d)),
     S('interfaces IFACE', (c, a) => {
       const n = ifaceName(a.v[0]);
@@ -996,6 +999,8 @@ function execCommon(user: boolean): CmdSpec<Ctx>[] {
     { pattern: 'exit', run: (c) => logout(c) },
     { pattern: 'logout', run: (c) => logout(c) },
     { pattern: 'ping A.B.C.D', run: (c, a) => iosPing(c.p, c.d, a.v[0]) },
+    { pattern: 'ping V6ADDR', run: (c, a) => iosPing(c.p, c.d, a.v[0]) },
+    { pattern: 'ping ipv6 V6ADDR', run: (c, a) => iosPing(c.p, c.d, a.v[0]), hidden: true },
     { pattern: 'ping WORD', run: (_c, a) => `Translating "${a.v[0]}"...domain server (255.255.255.255)\n% Unrecognized host or address, or protocol not running.\n\n` },
     { pattern: 'ping ip A.B.C.D', run: (c, a) => iosPing(c.p, c.d, a.v[0]), hidden: true },
     { pattern: 'traceroute A.B.C.D', run: (c, a) => iosTrace(c.p, c.d, a.v[0]) },
@@ -1296,9 +1301,26 @@ const cfgGlobal: CmdSpec<Ctx>[] = [
   { pattern: 'ip scp LINE', run: store('post') },
   { pattern: 'ip flow-export LINE', run: store('post') },
   { pattern: 'ipv6 unicast-routing', run: store('pre') },
-  { pattern: 'ipv6 route LINE', run: store('post') },
+  { pattern: 'ipv6 route V6PREFIX V6ADDR', run: store('post') },
+  { pattern: 'ipv6 route V6PREFIX V6ADDR <1-254>', run: store('post') },
+  { pattern: 'ipv6 route V6PREFIX IFACE', run: (c, a) => store('post')(c, { ...a, canonical: `ipv6 route ${a.v[0]} ${ifaceName(a.v[1]) ?? a.v[1]}` }) },
+  { pattern: 'ipv6 route V6PREFIX IFACE V6ADDR', run: (c, a) => store('post')(c, { ...a, canonical: `ipv6 route ${a.v[0]} ${ifaceName(a.v[1]) ?? a.v[1]} ${a.v[2]}` }) },
   { pattern: 'ipv6 cef', run: store('pre') },
-  { pattern: 'ipv6 dhcp LINE', run: store('pre') },
+  {
+    pattern: 'ipv6 dhcp pool WORD',
+    run: (c, a) => {
+      const header = `ipv6 dhcp pool ${a.v[0]}`;
+      if (c.negate) {
+        const b = blockLines(c.ios.extraPre, header);
+        if (b) c.ios.extraPre.splice(b.at, b.end - b.at);
+        return;
+      }
+      if (!blockLines(c.ios.extraPre, header)) c.ios.extraPre.push(header);
+      c.s.mode = 'pool6';
+      c.s.pool = a.v[0];
+    },
+  },
+  { pattern: 'ipv6 dhcp LINE', run: store('pre'), hidden: true },
   { pattern: 'ipv6 LINE', run: store('post'), hidden: true },
   { pattern: 'crypto key generate rsa', run: (c) => crypto(c) },
   { pattern: 'crypto key generate rsa general-keys modulus <360-4096>', run: (c, a) => crypto(c, Number(a.v[0])) },
@@ -1534,6 +1556,10 @@ const cfgIf: CmdSpec<Ctx>[] = [
   { pattern: 'ipv6 address autoconfig', run: ifStore },
   { pattern: 'ipv6 address dhcp', run: ifStore },
   { pattern: 'ipv6 enable', run: ifStore },
+  { pattern: 'ipv6 nd managed-config-flag', run: ifStore },
+  { pattern: 'ipv6 nd other-config-flag', run: ifStore },
+  { pattern: 'ipv6 nd ra suppress', run: ifStore },
+  { pattern: 'ipv6 dhcp server WORD', run: ifStore },
   { pattern: 'ipv6 LINE', run: ifStore, hidden: true },
   { pattern: 'duplex auto', run: ifStore },
   { pattern: 'duplex full', run: ifStore },
@@ -1711,6 +1737,19 @@ G.add('router', [
   { pattern: 'timers LINE', run: rtr },
 ]);
 
+/* ---------------- DHCPv6 pool ---------------- */
+
+const pool6 = cmd((c, a) => {
+  if (c.s.pool) blockEdit(c.ios.extraPre, `ipv6 dhcp pool ${c.s.pool}`, a.canonical, c.negate);
+});
+G.add('pool6', [
+  ...cfgCommon,
+  { pattern: 'address prefix V6PREFIX', run: pool6 },
+  { pattern: 'address prefix V6PREFIX lifetime LINE', run: pool6 },
+  { pattern: 'dns-server V6ADDR', run: pool6 },
+  { pattern: 'domain-name WORD', run: pool6 },
+]);
+
 /* ---------------- named access lists ---------------- */
 
 G.add('acl', [
@@ -1780,7 +1819,7 @@ G.add('vlan', [
 /*  exec                                                               */
 /* ================================================================== */
 
-const CONFIG_MODES: Mode[] = ['config', 'if', 'pool', 'line', 'router', 'vlan', 'acl'];
+const CONFIG_MODES: Mode[] = ['config', 'if', 'pool', 'pool6', 'line', 'router', 'vlan', 'acl'];
 
 function consoleLogin(d: Device, which: 'con' | 'vty' = 'con') {
   const con = d.ios ? linesOf(d, d.ios).find((l) => (which === 'con' ? l.name === 'con 0' : l.name.startsWith('vty'))) : undefined;

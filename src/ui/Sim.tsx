@@ -4,7 +4,7 @@ import { finishPdu, runPing } from '../actions';
 import type { PduLayers, SimEvent } from '../engine/network';
 import { I } from './Icons';
 
-const KINDS = ['ICMP', 'ARP', 'NAT', 'DHCP'] as const;
+const KINDS = ['ICMP', 'ARP', 'NDP', 'NAT', 'DHCP'] as const;
 
 /** Simulation mode: event list, packet inspector and the scenario's PDU list. */
 export function SimPanel() {

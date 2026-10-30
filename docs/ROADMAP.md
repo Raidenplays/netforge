@@ -106,7 +106,8 @@ Phase 1.
 
 - [x] Dynamic routing: RIP, OSPFv2, EIGRP, administrative distance, floating and recursive static routes
 - [x] ACLs: standard, extended, named, interfaces and VTY lines
-- [ ] IPv6 forwarding, SLAAC, DHCPv6
+- [x] IPv6 forwarding, SLAAC, DHCPv6
+- [x] Activity grading: cable types, variables, saved port settings (checked against real course labs)
 - [ ] OSPFv3, EIGRP for IPv6, RIPng
 - [ ] Spanning tree
 - [ ] EtherChannel, port security, DHCP snooping, DAI

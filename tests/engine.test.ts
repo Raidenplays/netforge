@@ -8,6 +8,7 @@ import { exec, newSession, parseRunningConfig, runningConfig } from '../src/engi
 import { hostExec } from '../src/engine/hostcli';
 import { uid } from '../src/model/types';
 import { sampleProject } from '../src/sample';
+import { isHost } from '../src/model/catalog';
 
 test('sample network: double NAT, DHCP, switch SVI', () => {
   const p = sampleProject();
@@ -63,10 +64,13 @@ withLab('full lab: DHCP + NAT + ping to web server', () => {
     hr.home!.wanMode = 'static'; hr.home!.wanIp = '209.122.122.1'; hr.home!.wanMask = '255.255.255.252'; hr.home!.wanGateway = '209.122.122.2';
     const w = web.ifaces[0]; w.ip = '209.209.100.100'; w.mask = '255.255.255.0'; web.gateway = '209.209.100.101';
     pc.dhcpClient = true; lap.dhcpClient = true; tab.dhcpClient = true;
-    p.links.push({ id: uid(), a: { dev: isp.id, iface: 'GigabitEthernet0/0' }, b: { dev: hr.id, iface: 'Internet' }, cable: 'straight' });
-    p.links.push({ id: uid(), a: { dev: isp.id, iface: 'GigabitEthernet0/1' }, b: { dev: web.id, iface: 'FastEthernet0' }, cable: 'straight' });
-    p.links.push({ id: uid(), a: { dev: pc.id, iface: 'FastEthernet0' }, b: { dev: hr.id, iface: 'GigabitEthernet 1' }, cable: 'straight' });
-    p.links.push({ id: uid(), a: { dev: lap.id, iface: 'FastEthernet0' }, b: { dev: hr.id, iface: 'GigabitEthernet 2' }, cable: 'straight' });
+    // cable whatever isn't cabled yet (the file may be a finished copy)
+    const used = (d: string, i: string) => p.links.some((l) => (l.a.dev === d && l.a.iface === i) || (l.b.dev === d && l.b.iface === i));
+    const cable = (a: string, ai: string, b: string, bi: string) => !used(a, ai) && !used(b, bi) && p.links.push({ id: uid(), a: { dev: a, iface: ai }, b: { dev: b, iface: bi }, cable: 'straight' });
+    cable(isp.id, 'GigabitEthernet0/0', hr.id, 'Internet');
+    cable(isp.id, 'GigabitEthernet0/1', web.id, 'FastEthernet0');
+    cable(pc.id, 'FastEthernet0', hr.id, 'GigabitEthernet 1');
+    cable(lap.id, 'FastEthernet0', hr.id, 'GigabitEthernet 2');
     console.log('dhcp', settleDhcp(p));
   });
   const pc = by('Gaming PC');
@@ -84,8 +88,18 @@ withLab('full lab: DHCP + NAT + ping to web server', () => {
   // export round-trip
   const ex = exportPkt(project);
   const again = importPkt(ex.xml, 'x.pkt').project;
-  expect(again.links.length).toBe(4);
+  expect(again.links.length).toBe(project.links.length);
   expect(again.devices.find(d=>d.name==='WEB Server')!.ifaces[0].ip).toBe('209.209.100.100');
+});
+
+withLab('a finished Assignment 7 works exactly as saved', () => {
+  const { project } = importPkt(xml, 'a7.pkt');
+  if (project.links.length < 4) return; // only meaningful for a completed copy
+  const p = produce(project, (d) => void settleDhcp(d));
+  const by = (n: string) => p.devices.find((d) => d.name === n)!;
+  // every host that has an address (by DHCP or set by hand) reaches the web server
+  for (const d of p.devices.filter((x) => isHost(x) && x.name !== 'WEB Server' && x.ifaces.some((i) => i.ip && !i.ip.startsWith('169.254'))))
+    expect(ping(p, by(d.name).id, '209.209.100.100').ok, d.name).toBe(true);
 });
 
 withLab('IOS CLI: DHCP pool on a router', () => {

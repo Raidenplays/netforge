@@ -3,6 +3,8 @@ import type { Device, Iface, Link, Project } from '../model/types';
 import { isHost } from '../model/catalog';
 import { computeControlPlane, lookup, type ControlPlane } from './routing';
 import { accessGroup, aclAllows, type Pkt as AclPkt } from './acl';
+import { ping6, settleV6 } from './ipv6';
+import { isV6 } from '../model/ip6';
 
 /* ------------------------------------------------------------------ */
 /*  Topology: L2 segments, interface status, L3 endpoints              */
@@ -367,7 +369,7 @@ export interface PduFields {
 }
 
 export interface SimEvent {
-  kind: 'ICMP' | 'ARP' | 'DHCP' | 'NAT';
+  kind: 'ICMP' | 'ARP' | 'DHCP' | 'NAT' | 'NDP';
   /** device that sent / handled it ("Last Device") */
   at: string;
   /** device it arrives at ("At Device") */
@@ -720,6 +722,7 @@ export interface PingOpts {
 }
 
 export function ping(p: Project, srcId: string, dst: string, opts: PingOpts = {}): PingResult {
+  if (isV6(dst)) return ping6(p, srcId, dst);
   const t = buildTopo(p);
   const src = t.devs.get(srcId);
   const events: SimEvent[] = [];
@@ -906,6 +909,7 @@ export function settleDhcp(p: Project) {
       d.gateway = '0.0.0.0';
     }
   }
+  settleV6(p);
   return log;
 }
 

@@ -9,7 +9,7 @@ along that is. ✅ done · 🟡 partly done · ❌ not started.
 | --- | --- | --- |
 | Open `.pkt` / `.pka` (PT 5.0 to 9.0.1) | ✅ | Every sample network bundled with PT 9.0.1 opens |
 | Save back to `.pkt` | 🟡 | Edits to existing devices and cables; devices added in NetForge aren't written yet |
-| Activities: instructions, Check Results | 🟡 | Many assessment items graded; variable-based items and cable codes not yet |
+| Activities: instructions, Check Results | 🟡 | Cable types, activity variables and saved port settings are graded; Assignment 6 and the DHCP lab are 100% gradable. A few items (DHCP lease order, PPP/802.1X flags, physical location) aren't yet |
 | Activity timer, locked interfaces, dynamic feedback | ❌ | |
 | `.pkz` (bundled files), `.pksz` | ❌ | |
 
@@ -43,7 +43,7 @@ along that is. ✅ done · 🟡 partly done · ❌ not started.
 
 | App | Status | Notes |
 | --- | --- | --- |
-| IP Configuration | ✅ | IPv4, DHCP; IPv6 ❌ |
+| IP Configuration | ✅ | IPv4 and DHCP; IPv6 static, auto config (SLAAC) and DHCPv6 |
 | Command Prompt | 🟡 | ipconfig, ping (names too), tracert, nslookup, arp, telnet, ssh |
 | Terminal (console cable) | ✅ | |
 | Telnet / SSH Client | ✅ | Checks VTY transport, login, local users, RSA keys |
@@ -72,7 +72,7 @@ along that is. ✅ done · 🟡 partly done · ❌ not started.
 | DHCP server, relay, NAT overload | ✅ | Static NAT and NAT pools ❌ |
 | VLANs, 802.1Q trunks, router-on-a-stick, SVIs | ✅ | |
 | Inter-VLAN routing on multilayer switches (`ip routing`) | 🟡 | |
-| IPv6 addressing | 🟡 | Configured and shown, not forwarded |
+| IPv6 | 🟡 | Addressing, link-local, static routes, `ipv6 unicast-routing`, SLAAC, stateless and stateful DHCPv6, ping, `show ipv6 route/interface brief/neighbors`. Not yet: OSPFv3, EIGRPv6, RIPng, IPv6 ACLs, DHCPv6 on Server-PT |
 | RIP v1/v2 | ✅ | Hop counts, classful summarisation, split horizon, passive interfaces, default origination |
 | OSPFv2 | 🟡 | Areas, costs, router IDs, DR/BDR, passive interfaces, default origination, `show ip ospf neighbor`. Not yet: authentication, priorities, stub areas, virtual links, area ranges, timers |
 | EIGRP | 🟡 | AS matching, wildcards, composite metrics, `bandwidth`/`delay`, auto-summary. Not yet: authentication, variance, feasible successors, stub |

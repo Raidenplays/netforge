@@ -1629,3 +1629,8 @@ textarea.code-edit {
   font-family: var(--mono);
   font-size: 12px;
 }
+
+.proto.NDP {
+  background: color-mix(in srgb, #fb923c 20%, transparent);
+  color: #fdba74;
+}

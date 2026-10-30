@@ -4,10 +4,11 @@
  */
 import { emptyIos, isConsolePort } from '../model/catalog';
 import { randomMac } from '../model/ip';
-import type { Activity, CableType, Device, DeviceKind, GradeItem, Iface, Link, Media, Project, ServerServices } from '../model/types';
+import type { Activity, ActivityVar, CableType, Device, DeviceKind, GradeItem, Iface, Link, Media, Project, ServerServices } from '../model/types';
 import { uid } from '../model/types';
 import { parseRunningConfig, runningConfigForPkt } from '../engine/ios';
 import { defaultServices } from '../engine/services';
+import { isV6, normV6 } from '../model/ip6';
 
 const KIND: Record<string, DeviceKind> = {
   Router: 'router',
@@ -72,6 +73,7 @@ function readActivity(root: Element): Activity | undefined {
           expected: name.getAttribute('nodeValue') ?? '',
           points: Number(txt(c, 'POINTS')) || 1,
           variable: !!name.getAttribute('variableName'),
+          variableName: name.getAttribute('variableName') || undefined,
         });
       walk(c, p);
     }
@@ -79,7 +81,25 @@ function readActivity(root: Element): Activity | undefined {
   const comp = kid(root, 'COMPARISONS');
   if (comp) walk(comp, []);
   const titleMatch = pages[0]?.match(/<title>([^<]*)<\/title>/i);
-  return { title: titleMatch?.[1]?.trim(), pages, items, completeFeedback: txt(root, 'OVERALL_COMPLETE_FEEDBACK') };
+  return { title: titleMatch?.[1]?.trim(), pages, items, completeFeedback: txt(root, 'OVERALL_COMPLETE_FEEDBACK'), variables: readVariables(root) };
+}
+
+/** VARIABLE_MANAGER: variables point at pools of allowed values */
+function readVariables(root: Element): Record<string, ActivityVar> {
+  const vm = kid(root, 'VARIABLE_MANAGER');
+  const out: Record<string, ActivityVar> = {};
+  if (!vm) return out;
+  const pools = new Map<string, ActivityVar>();
+  for (const sp of kids(kid(vm, 'STRING_POOLS'), 'STRING_POOL'))
+    pools.set(txt(sp, 'NAME'), { kind: 'string', values: kids(sp, 'VALUES').flatMap((v) => (v.textContent ?? '').split(/[,\n]/).map((x) => x.trim()).filter(Boolean)) });
+  for (const ip of kids(kid(vm, 'IP_POOLS'), 'IP_POOL')) pools.set(txt(ip, 'NAME'), { kind: 'ip', first: txt(ip, 'FIRST_IP'), last: txt(ip, 'LAST_IP') });
+  for (const np of kids(kid(vm, 'NUMBER_POOLS'), 'NUMBER_POOL'))
+    pools.set(txt(np, 'NAME'), { kind: 'number', min: Number(txt(np, 'MIN') || txt(np, 'MIN_VALUE')), max: Number(txt(np, 'MAX') || txt(np, 'MAX_VALUE')) });
+  for (const v of Array.from(kid(vm, 'VARIABLES_POOLS')?.children ?? [])) {
+    const pool = pools.get(txt(v, 'POOL_NAME'));
+    if (pool) out[txt(v, 'NAME')] = pool;
+  }
+  return out;
 }
 
 function mediaOf(type: string): [Media, number, string] {
@@ -219,11 +239,14 @@ const CABLE_FROM_PT: Record<string, CableType> = {
   eSerialDCE: 'serial',
   eSerialDTE: 'serial',
   eConsole: 'console',
+  eMultiMode: 'fiber',
+  eSingleMode: 'fiber',
+  eSerial: 'serial',
 };
 const CABLE_TO_PT: Record<CableType, string> = {
   straight: 'eStraightThrough',
   cross: 'eCrossOver',
-  fiber: 'eFiber',
+  fiber: 'eMultiMode',
   serial: 'eSerialDCE',
   console: 'eConsole',
   auto: 'eStraightThrough',
@@ -350,6 +373,19 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
       }
       if (ifaces.some((i) => i.media === 'wireless')) d.ssid = txt(engine, 'WIRELESS_CLIENT/WIRELESS_COMMON/SSID') || 'Default';
       if (kind === 'server') d.services = readServices(engine!, name);
+      // IPv6 on the host's first port
+      if (first) {
+        const v6 = kids(kid(first.el, 'IPV6_ADDRESSES'), 'IPV6_ADDRESS').filter((x) => txt(x, 'TYPE') === '0');
+        const host = ifaces.find((x) => x.media !== 'wireless') ?? ifaces[0];
+        if (host && v6.length) host.v6 = v6.map((x) => ({ addr: normV6(txt(x, 'ADDRESS')), len: Number(txt(x, 'PREFIX')) || 64 }));
+        const ll = txt(first.el, 'IPV6_LINK_LOCAL');
+        if (host && ll && isV6(ll)) host.v6ll = normV6(ll);
+        d.v6Mode = txt(first.el, 'IPV6_PORT_DHCP_ENABLED') === 'true' ? 'dhcp' : txt(first.el, 'IPV6_ADDRESS_AUTOCONFIG') === 'true' ? 'auto' : 'static';
+        const gw6 = txt(first.el, 'IPV6_PORT_GATEWAY');
+        if (gw6 && isV6(gw6)) d.gateway6 = normV6(gw6);
+        const dns6 = txt(first.el, 'IPV6_PORT_DNS');
+        if (dns6 && isV6(dns6)) d.dns6 = normV6(dns6);
+      }
     }
     if (kind === 'other' || kind === 'cloud') warnings.push(`${name} (${type}) is shown but not simulated.`);
     devices.push(d);
@@ -383,7 +419,7 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
       id: uid('lnk'),
       a: { dev: a.id, iface: fix(a, ports[0]) },
       b: { dev: b.id, iface: fix(b, ports[1]) },
-      cable: CABLE_FROM_PT[txt(cable, 'TYPE')] ?? 'straight',
+      cable: CABLE_FROM_PT[txt(cable, 'TYPE')] ?? (txt(lk, 'TYPE') === 'eFiber' ? 'fiber' : txt(lk, 'TYPE') === 'eSerial' ? 'serial' : 'straight'),
       ptIndex: li,
     });
   });
@@ -450,6 +486,25 @@ export function exportPkt(p: Project): ExportReport {
       }
       setTxt(rp.el, 'POWER', String(!i.shutdown));
       if (d.dhcpClient !== undefined && k === ports.findIndex((x) => x.type)) setTxt(rp.el, 'PORT_DHCP_ENABLE', String(!!d.dhcpClient));
+      if (k === ports.findIndex((x) => x.type) && (d.v6Mode || d.gateway6 !== undefined)) {
+        setTxt(rp.el, 'IPV6_ADDRESS_AUTOCONFIG', String(d.v6Mode === 'auto'));
+        setTxt(rp.el, 'IPV6_PORT_DHCP_ENABLED', String(d.v6Mode === 'dhcp'));
+        setTxt(rp.el, 'IPV6_PORT_GATEWAY', d.gateway6 ?? '');
+        setTxt(rp.el, 'IPV6_PORT_DNS', d.dns6 ?? '');
+        const list = kid(rp.el, 'IPV6_ADDRESSES');
+        if (list && d.v6Mode === 'static') {
+          for (const x of kids(list, 'IPV6_ADDRESS')) list.removeChild(x);
+          for (const a of i.v6 ?? []) {
+            const e = doc.createElement('IPV6_ADDRESS');
+            for (const [tag, v] of [['ADDRESS', a.addr], ['PREFIX', String(a.len)], ['TYPE', '0']]) {
+              const c = doc.createElement(tag);
+              c.textContent = v;
+              e.appendChild(c);
+            }
+            list.appendChild(e);
+          }
+        }
+      }
     });
 
     if (d.ios) {
@@ -575,3 +630,34 @@ export function exportPkt(p: Project): ExportReport {
 
   return { xml: new XMLSerializer().serializeToString(doc), notExported };
 }
+
+/* ------------------------------------------------------------------ */
+/*  Reading saved values NetForge doesn't model (for activity grading)  */
+/* ------------------------------------------------------------------ */
+
+let cachedXml = '';
+let cachedDevs: Element[] = [];
+
+/** the saved <DEVICE> element of a device in the working network */
+export function deviceXml(p: Project, d: Device): Element | null {
+  if (!p.sourceXml || d.ptIndex === undefined) return null;
+  if (cachedXml !== p.sourceXml) {
+    const doc = new DOMParser().parseFromString(p.sourceXml, 'application/xml');
+    cachedDevs = kids(kid(kid(workingNet(doc.documentElement), 'NETWORK'), 'DEVICES'), 'DEVICE');
+    cachedXml = p.sourceXml;
+  }
+  return cachedDevs[d.ptIndex] ?? null;
+}
+
+/** the saved <PORT> element for one of a device's interfaces */
+export function portXml(p: Project, d: Device, iface: string): Element | null {
+  const el = deviceXml(p, d);
+  if (!el) return null;
+  const engine = kid(el, 'ENGINE')!;
+  const ports = collectPorts(kid(engine, 'MODULE'));
+  const names = nameIfaces(d.kind, ports, configLines(engine, 'RUNNINGCONFIG'));
+  const k = names.findIndex((n) => n === iface);
+  return k >= 0 ? ports[k].el : null;
+}
+
+export const xmlText = (el: Element | null, tag: string) => (el ? txt(el, tag) : '');

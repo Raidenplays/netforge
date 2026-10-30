@@ -34,6 +34,8 @@ test.skipIf(!A6)('Assignment 6: relay DHCP, serial interface routes, AP Wi-Fi, g
   expect(ping(p, by('Laptop').id, '172.31.1.10').ok).toBe(true);
   const g = grade(p)!;
   expect(g.earned).toBe(g.checkable);
+  // every item is gradable, including cable types (fiber between the switches)
+  expect(g.checkable).toBe(g.total);
   // removing a graded cable is caught
   const cut = { ...p, links: p.links.slice(1) };
   expect(grade(cut)!.earned).toBeLessThan(g.checkable);
@@ -53,6 +55,8 @@ test.skipIf(!DHCP)('11.2.3 DHCP on a wireless router: grading + export keeps ans
   expect(by('PC0').ifaces[0].ip).toMatch(/^192\.168\.5\./);
   const g = grade(p)!;
   expect(g.earned).toBe(g.checkable);
+  // the PCs' addresses are graded against the activity's address-range variable
+  expect(g.checkable).toBe(g.total);
   // wrong max users is caught
   const h = by('DHCP Enabled Router').home!;
   h.maxUsers = 10;

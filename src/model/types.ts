@@ -37,6 +37,10 @@ export interface Iface {
   allowedVlans?: string;
   /** router subinterfaces: `encapsulation dot1Q <id>` */
   dot1q?: number;
+  /** hosts: IPv6 addresses (static, or learned by SLAAC / DHCPv6); IOS keeps them in its config */
+  v6?: { addr: string; len: number }[];
+  /** hosts: link-local address if set by hand (otherwise EUI-64 from the MAC) */
+  v6ll?: string;
 }
 
 export interface Vlan {
@@ -163,6 +167,11 @@ export interface Device {
   gateway?: string;
   dns?: string;
   dhcpClient?: boolean;
+  /** hosts: how the IPv6 address is set */
+  v6Mode?: 'static' | 'auto' | 'dhcp';
+  /** hosts: IPv6 default gateway and DNS server */
+  gateway6?: string;
+  dns6?: string;
   /** Wi-Fi clients: network they try to join */
   ssid?: string;
   /** DHCP service (servers) */
@@ -208,15 +217,20 @@ export interface GradeItem {
   path: string[];
   expected: string;
   points: number;
-  /** compared against an activity variable we don't evaluate */
+  /** compared against an activity variable instead of a fixed value */
   variable: boolean;
+  variableName?: string;
 }
+
+/** an activity variable: any value from a list, or any address in a range */
+export type ActivityVar = { kind: 'string'; values: string[] } | { kind: 'ip'; first: string; last: string } | { kind: 'number'; min: number; max: number };
 
 export interface Activity {
   title?: string;
   pages: string[];
   items: GradeItem[];
   completeFeedback?: string;
+  variables?: Record<string, ActivityVar>;
 }
 
 export interface Project {

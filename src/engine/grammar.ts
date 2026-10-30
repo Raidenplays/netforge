@@ -15,6 +15,8 @@
  * `?` and Tab completion from the same tables.
  */
 
+import { normV6 } from '../model/ip6';
+
 export type ArgKind = 'WORD' | 'LINE' | 'RANGE' | 'IPV4' | 'IFACE' | 'IFRANGE' | 'NEXTHOP' | 'V6PREFIX' | 'V6ADDR' | 'VLANLIST';
 
 export interface CmdSpec<C> {
@@ -233,7 +235,10 @@ export class Grammar<C> {
         }
       }
       if (took && next) {
-        const val = toks.slice(k, k + took).join(' ');
+        let val = toks.slice(k, k + took).join(' ');
+        const kind = n.args.find((x) => x.next === next)?.kind;
+        if (kind === 'V6ADDR') val = normV6(val);
+        if (kind === 'V6PREFIX') val = `${normV6(val.split('/')[0])}/${val.split('/')[1]}`;
         v.push(val);
         canon.push(val);
         n = next;
