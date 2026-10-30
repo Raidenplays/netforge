@@ -334,12 +334,41 @@ function routeLookup(t: Topo, d: Device, dst: string): Fwd | { error: string } {
   return { egress: cands[0].egress, nextHop: cands[0].nextHop, viaIface: cands[0].viaIface };
 }
 
+/** One OSI layer as shown in the packet inspector (index 0 = Layer 1). */
+export interface PduLayers {
+  /** text for layers 1..7 (empty string = not used at this step) */
+  layers: string[];
+  /** what the device does at this step, in order */
+  steps: string[];
+}
+
+export interface PduFields {
+  inPort?: string;
+  outPort?: string;
+  srcMac?: string;
+  dstMac?: string;
+  vlan?: number;
+  srcIp?: string;
+  dstIp?: string;
+  ttl?: number;
+  icmpType?: number;
+  arp?: { op: 'request' | 'reply'; senderIp: string; senderMac: string; targetIp: string; targetMac: string };
+  nat?: { from: string; to: string; side: 'source' | 'destination' };
+}
+
 export interface SimEvent {
   kind: 'ICMP' | 'ARP' | 'DHCP' | 'NAT';
+  /** device that sent / handled it ("Last Device") */
   at: string;
+  /** device it arrives at ("At Device") */
   to?: string;
   info: string;
   ok: boolean;
+  /** simulated time in seconds */
+  time?: number;
+  in?: PduLayers;
+  out?: PduLayers;
+  fields?: PduFields;
 }
 
 export interface Hop {
@@ -366,6 +395,51 @@ interface Leg {
   routersIn: { dev: Device; ip: string }[];
 }
 
+const BROADCAST = 'FFFF.FFFF.FFFF';
+const blank = () => ['', '', '', '', '', '', ''];
+
+function macOf(d: Device, iface: string) {
+  if (iface === 'LAN') return d.ifaces.find((i) => i.name !== 'Internet' && i.media !== 'console')?.mac ?? '0000.0000.0000';
+  return ifaceOf(d, iface)?.mac ?? d.ifaces[0]?.mac ?? '0000.0000.0000';
+}
+
+/** the physical port an endpoint sends from (subinterfaces and SVIs use their parent / a member port) */
+const portName = (iface: string) => iface.split('.')[0];
+
+interface Pkt {
+  src: string;
+  dst: string;
+  ttl: number;
+}
+
+const icmpName = (t: number) => (t === 8 ? 'Echo Request' : 'Echo Reply');
+
+function l3Layers(pkt: Pkt, icmp: number, l1: string, l2: string): string[] {
+  const L = blank();
+  L[0] = l1;
+  L[1] = l2;
+  // like Packet Tracer, ICMP is shown with the IP header at layer 3
+  L[2] = `IP Header Src. IP: ${pkt.src}, Dest. IP: ${pkt.dst}, TTL: ${pkt.ttl} · ICMP Message Type: ${icmp} (${icmpName(icmp)})`;
+  return L;
+}
+
+/** ports a frame crosses at each switch / AP / home-router bridge along a layer 2 path */
+function bridgeSteps(t: Topo, path: { links: string[]; devs: string[] }) {
+  const links = path.links.map((id) => [...t.links, ...t.wireless].find((l) => l.id === id)).filter((l): l is Link => !!l);
+  const out: { dev: Device; inPort: string; outPort: string }[] = [];
+  for (let k = 0; k + 1 < links.length; k++) {
+    const a = links[k];
+    const b = links[k + 1];
+    const shared = [a.a.dev, a.b.dev].find((d) => d === b.a.dev || d === b.b.dev);
+    const dev = shared ? t.devs.get(shared) : undefined;
+    if (!dev) continue;
+    const inPort = a.a.dev === shared ? a.a.iface : a.b.iface;
+    const outPort = b.a.dev === shared ? b.a.iface : b.b.iface;
+    out.push({ dev, inPort, outPort });
+  }
+  return out;
+}
+
 function forward(
   t: Topo,
   start: Device,
@@ -379,22 +453,66 @@ function forward(
 ): Leg {
   let cur = start;
   let ingress: Endpoint | undefined;
-  let pkt = { src, dst };
+  const ttl0 = isHost(start) ? 128 : 255;
+  let pkt: Pkt = { src, dst, ttl: ttl0 };
+  const icmp = reply ? 0 : 8;
   const routersIn: { dev: Device; ip: string }[] = [];
-  for (let ttl = 30; ttl > 0; ttl--) {
+  /** the event for the packet's arrival at `cur`, so its "out" side can be filled in */
+  let arrival: SimEvent | undefined;
+
+  for (let guard = 30; guard > 0; guard--) {
+    const outSteps: string[] = [];
+    if (!arrival) {
+      // the packet's first appearance: an event at the source with only an outbound side
+      arrival = { kind: 'ICMP', at: '--', to: cur.name, info: `${icmpName(icmp)} created`, ok: true, fields: { srcIp: pkt.src, dstIp: pkt.dst, ttl: pkt.ttl, icmpType: icmp } };
+      events.push(arrival);
+    }
     // NAT un-translation on the way back
     const back = nat.find((n) => n.dev === cur.id && n.outside === pkt.dst && reply);
     if (back) {
-      events.push({ kind: 'NAT', at: cur.name, info: `Translate ${pkt.dst} → ${back.inside}`, ok: true });
+      events.push({
+        kind: 'NAT',
+        at: cur.name,
+        info: `Translate ${pkt.dst} → ${back.inside}`,
+        ok: true,
+        fields: { nat: { from: pkt.dst, to: back.inside, side: 'destination' }, srcIp: pkt.src, dstIp: back.inside },
+      });
+      outSteps.push(`NAT finds a translation for ${pkt.dst} and changes the destination address to ${back.inside}.`);
       pkt = { ...pkt, dst: back.inside };
     }
-    if (t.endpoints.some((e) => e.dev.id === cur.id && e.ip === pkt.dst))
+    if (t.endpoints.some((e) => e.dev.id === cur.id && e.ip === pkt.dst)) {
+      if (arrival?.in) arrival.in.steps.push(reply ? 'The ICMP process receives the Echo Reply. The ping is complete.' : 'The packet is addressed to this device, so it is processed here.');
       return { ok: true, reachedDev: cur, finalSrc: pkt.src, routersIn };
+    }
 
     const f = routeLookup(t, cur, pkt.dst);
     if ('error' in f) {
-      events.push({ kind: 'ICMP', at: cur.name, info: `Dropped: ${f.error}`, ok: false });
+      events.push({
+        kind: 'ICMP',
+        at: cur.name,
+        info: `Dropped: ${f.error}`,
+        ok: false,
+      });
+      arrival.out = { layers: blank(), steps: [...outSteps, `The device drops the packet: ${f.error}.`] };
       return { ok: false, reason: cur === start ? f.error : `Destination host unreachable (${cur.name})`, finalSrc: pkt.src, routersIn };
+    }
+
+    // routers decrement TTL when they forward
+    if (cur !== start) {
+      pkt = { ...pkt, ttl: pkt.ttl - 1 };
+      outSteps.push(
+        `The device looks up ${pkt.dst} in its routing table and forwards out ${f.egress.iface}${f.nextHop !== pkt.dst ? ` towards ${f.nextHop}` : ''}.`,
+        `The TTL is decremented to ${pkt.ttl}.`,
+      );
+      if (pkt.ttl <= 0) {
+        events.push({ kind: 'ICMP', at: cur.name, info: 'TTL expired in transit', ok: false });
+        return { ok: false, reason: 'TTL expired in transit.', finalSrc: pkt.src, routersIn };
+      }
+    } else {
+      outSteps.push(
+        reply ? `The device creates an ICMP Echo Reply to ${pkt.dst}.` : `The ping process creates an ICMP Echo Request to ${pkt.dst}.`,
+        f.nextHop === pkt.dst ? `${pkt.dst} is on a local network, so the packet goes straight to it.` : `${pkt.dst} is on another network, so the packet goes to the next hop ${f.nextHop}.`,
+      );
     }
 
     // NAT on the way out
@@ -407,7 +525,14 @@ function forward(
       if (routerNat || homeNat) {
         const outside = f.egress.ip;
         nat.push({ dev: cur.id, inside: pkt.src, outside });
-        events.push({ kind: 'NAT', at: cur.name, info: `Translate ${pkt.src} → ${outside}`, ok: true });
+        events.push({
+          kind: 'NAT',
+          at: cur.name,
+          info: `Translate ${pkt.src} → ${outside}`,
+          ok: true,
+          fields: { nat: { from: pkt.src, to: outside, side: 'source' }, srcIp: outside, dstIp: pkt.dst },
+        });
+        outSteps.push(`NAT translates the inside source address ${pkt.src} to ${outside}.`);
         pkt = { ...pkt, src: outside };
       }
     }
@@ -418,35 +543,111 @@ function forward(
       const peers = t.endpoints.filter((e) => segOf(t, e.node) === seg && e.dev.id !== cur.id);
       if (peers.length === 1) target = peers[0];
     }
+    const myMac = macOf(cur, f.egress.iface);
     const arpKey = `${seg}|${f.nextHop}`;
     if (!arp.has(arpKey)) {
       arp.add(arpKey);
+      // the target learns the sender's MAC from the request, so it won't need to ARP back
+      arp.add(`${seg}|${f.egress.ip}`);
+      outSteps.push(`The next-hop address ${f.nextHop} is not in the ARP table, so the device sends an ARP request first.`);
+      const L = blank();
+      L[0] = `Port ${portName(f.egress.iface)}`;
+      L[1] = `Ethernet II Header ${myMac} >> ${BROADCAST}`;
+      L[2] = `ARP Packet Src. IP: ${f.egress.ip}, Dest. IP: ${f.nextHop}`;
       events.push({
         kind: 'ARP',
         at: cur.name,
+        to: target?.dev.name,
         info: target ? `Who has ${f.nextHop}? ${target.dev.name} replies` : `Who has ${f.nextHop}? No reply`,
         ok: !!target,
+        out: {
+          layers: L,
+          steps: [
+            `The device needs the MAC address of ${f.nextHop}.`,
+            `It broadcasts an ARP request out ${portName(f.egress.iface)}: "Who has ${f.nextHop}? Tell ${f.egress.ip}".`,
+            target ? `${target.dev.name} owns ${f.nextHop} and answers with its MAC address ${macOf(target.dev, target.iface)}.` : 'Nobody answers, so the packet can\'t be sent.',
+          ],
+        },
+        fields: {
+          outPort: portName(f.egress.iface),
+          srcMac: myMac,
+          dstMac: BROADCAST,
+          arp: { op: 'request', senderIp: f.egress.ip, senderMac: myMac, targetIp: f.nextHop, targetMac: target ? macOf(target.dev, target.iface) : '0000.0000.0000' },
+        },
       });
     }
     if (!target) {
       hops.push({ links: [], devs: [cur.id], kind: 'ARP', reply, fail: true, ev: events.length - 1 });
+      arrival.out = { layers: blank(), steps: [...outSteps, 'The ARP request times out and the packet is dropped.'] };
       return { ok: false, reason: 'Request timed out.', finalSrc: pkt.src, routersIn };
     }
+    const dstMac = macOf(target.dev, target.iface);
+    const outL = l3Layers(pkt, icmp, `Port(s): ${portName(f.egress.iface)}`, `Ethernet II Header ${myMac} >> ${dstMac}`);
+    arrival.out = { layers: outL, steps: [...outSteps, `The device sends the frame out ${portName(f.egress.iface)}.`] };
+
     const path = l2Path(t, f.egress.node, target.node);
+    // frames cross switches (and other bridges) on the way: one event each, layer 2 only
+    const firstEv = events.length;
+    for (const b of path ? bridgeSteps(t, path) : []) {
+      if (b.dev.kind !== 'switch' && b.dev.kind !== 'ap' && b.dev.kind !== 'homerouter') continue;
+      const inI = ifaceOf(b.dev, b.inPort);
+      const outI = ifaceOf(b.dev, b.outPort);
+      const vlanIn = inI?.swMode === 'trunk' ? undefined : inI?.accessVlan ?? 1;
+      const L2 = `Ethernet II Header ${myMac} >> ${dstMac}`;
+      const inL = l3Layers(pkt, icmp, `Port ${b.inPort}`, L2);
+      const outL2 = l3Layers(pkt, icmp, `Port(s): ${b.outPort}`, outI?.swMode === 'trunk' ? `Dot1q Header ${myMac} >> ${dstMac} (VLAN tag)` : L2);
+      for (const L of [inL, outL2]) for (let k = 2; k < 7; k++) L[k] = '';
+      events.push({
+        kind: 'ICMP',
+        at: events.length > firstEv ? events[events.length - 1].to! : cur.name,
+        to: b.dev.name,
+        info: `${icmpName(icmp)} ${pkt.src} → ${pkt.dst}`,
+        ok: true,
+        in: { layers: inL, steps: [`${b.inPort} receives the frame.`, ...(vlanIn ? [`The port is an access port in VLAN ${vlanIn}.`] : ['The port is a trunk; the frame keeps its 802.1Q VLAN tag.'])] },
+        out: {
+          layers: outL2,
+          steps: [
+            `The switch looks up ${dstMac} in its MAC address table.`,
+            `It forwards the frame out ${b.outPort}${outI?.swMode === 'trunk' ? ', a trunk, with an 802.1Q tag' : ''}.`,
+          ],
+        },
+        fields: { inPort: b.inPort, outPort: b.outPort, srcMac: myMac, dstMac, vlan: vlanIn, srcIp: pkt.src, dstIp: pkt.dst, ttl: pkt.ttl, icmpType: icmp },
+      });
+    }
+    const lastDev = events.length > firstEv ? events[events.length - 1].to! : cur.name;
     hops.push({ links: path?.links ?? [], devs: path?.devs ?? [cur.id, target.dev.id], kind: 'ICMP', reply, ev: events.length });
-    events.push({
+    const inPort = portName(target.iface === 'LAN' ? (path ? lastPortOn(t, path, target.dev.id) ?? 'LAN' : 'LAN') : target.iface);
+    arrival = {
       kind: 'ICMP',
-      at: cur.name,
+      at: lastDev,
       to: target.dev.name,
-      info: `${reply ? 'Echo reply' : 'Echo request'} ${pkt.src} → ${pkt.dst}`,
+      info: `${icmpName(icmp)} ${pkt.src} → ${pkt.dst}`,
       ok: true,
-    });
+      in: {
+        layers: l3Layers(pkt, icmp, `Port ${inPort}`, `Ethernet II Header ${myMac} >> ${dstMac}`),
+        steps: [`${inPort} receives the frame.`, `The frame's destination MAC ${dstMac} matches the receiving port, so the device takes the packet out of the frame.`],
+      },
+      fields: { inPort, srcMac: myMac, dstMac, srcIp: pkt.src, dstIp: pkt.dst, ttl: pkt.ttl, icmpType: icmp },
+    };
+    events.push(arrival);
     if (!isHost(target.dev) && target.dev.kind !== 'switch') routersIn.push({ dev: target.dev, ip: target.ip });
     ingress = target;
     cur = target.dev;
   }
   events.push({ kind: 'ICMP', at: cur.name, info: 'TTL expired in transit', ok: false });
   return { ok: false, reason: 'TTL expired in transit.', finalSrc: pkt.src, routersIn };
+}
+
+/** simulated time: one millisecond per event, as in Packet Tracer's event list */
+function stamp(events: SimEvent[]) {
+  events.forEach((e, i) => (e.time = i / 1000));
+}
+
+function lastPortOn(t: Topo, path: { links: string[] }, dev: string) {
+  const id = path.links[path.links.length - 1];
+  const l = [...t.links, ...t.wireless].find((x) => x.id === id);
+  if (!l) return undefined;
+  return l.a.dev === dev ? l.a.iface : l.b.dev === dev ? l.b.iface : undefined;
 }
 
 export interface PingResult {
@@ -475,9 +676,11 @@ export function ping(p: Project, srcId: string, dst: string): PingResult {
   const nat: NatEntry[] = [];
   const arp = new Set<string>();
   const there = forward(t, src, srcEp.ip, dst, false, nat, hops, events, arp);
+  stamp(events);
   if (!there.ok || !there.reachedDev)
     return { ok: false, reason: there.reason, srcIp: srcEp.ip, hops, events, routers: there.routersIn.map((r) => ({ name: r.dev.name, ip: r.ip })) };
   const back = forward(t, there.reachedDev, dst, there.finalSrc, true, nat, hops, events, arp);
+  stamp(events);
   return {
     ok: back.ok,
     reason: back.ok ? undefined : 'Request timed out.',

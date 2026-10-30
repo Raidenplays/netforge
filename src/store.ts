@@ -30,6 +30,23 @@ export interface Flight {
   playing: boolean;
   ok: boolean;
   label: string;
+  /** event picked in the event list for the packet inspector */
+  sel?: number | null;
+  /** scenario PDU this flight belongs to */
+  pdu?: number;
+}
+
+/** a ping in the simulation scenario list (Packet Tracer's "PDU list") */
+export interface PduRec {
+  id: number;
+  num: number;
+  srcId: string;
+  dst: string;
+  srcName: string;
+  dstName: string;
+  status: 'In Progress' | 'Successful' | 'Failed';
+  color: string;
+  time: number;
 }
 
 interface State {
@@ -49,6 +66,9 @@ interface State {
   log: LogEntry[];
   toasts: Toast[];
   flight: Flight | null;
+  pdus: PduRec[];
+  /** event types hidden by the event list filter */
+  simHide: string[];
   speed: number;
   inspectorTab: 'overview' | 'config' | 'cli';
   palette: boolean;
@@ -93,6 +113,8 @@ export const useStore = create<State>((set, get) => ({
   log: [],
   toasts: [],
   flight: null,
+  pdus: [],
+  simHide: [],
   speed: 1,
   inspectorTab: 'overview',
   palette: false,

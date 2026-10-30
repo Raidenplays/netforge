@@ -1,6 +1,7 @@
 import { randomMac } from './ip';
 import type { Device, DeviceKind, Iface, IosState, Media } from './types';
 import { uid } from './types';
+import { defaultServices } from '../engine/services';
 
 export interface Template {
   model: string;
@@ -180,6 +181,7 @@ export function createDevice(t: Template, x: number, y: number, existingNames: s
   if (t.kind === 'router' || t.kind === 'switch') d.ios = emptyIos(name);
   if (t.kind === 'switch') ifaces.push({ name: 'Vlan1', media: 'virtual', speed: 0, mac: randomMac(), shutdown: true });
   if (t.kind === 'ap') d.ssid = 'Default';
+  if (t.kind === 'server') d.services = defaultServices(name);
   if (t.kind === 'homerouter')
     d.home = {
       lanIp: '192.168.0.1',
@@ -205,3 +207,12 @@ export function createDevice(t: Template, x: number, y: number, existingNames: s
 
 export const isHost = (d: Device) => ['pc', 'laptop', 'server', 'printer', 'tablet', 'phone'].includes(d.kind);
 export const isIos = (d: Device) => !!d.ios;
+
+/** the console / RS-232 port a device has, if any (not part of `ifaces`: it never carries network traffic) */
+export function consolePort(d: Pick<Device, 'kind'>): string | null {
+  if (d.kind === 'router' || d.kind === 'switch') return 'Console';
+  if (d.kind === 'pc' || d.kind === 'laptop') return 'RS 232';
+  return null;
+}
+
+export const isConsolePort = (name: string) => /^(Console|RS ?232)$/i.test(name.trim());

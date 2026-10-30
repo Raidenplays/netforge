@@ -12,7 +12,7 @@ export type DeviceKind =
   | 'cloud'
   | 'other';
 
-export type Media = 'copper' | 'fiber' | 'wireless' | 'serial' | 'virtual';
+export type Media = 'copper' | 'fiber' | 'wireless' | 'serial' | 'virtual' | 'console';
 
 export interface Iface {
   name: string;
@@ -117,6 +117,22 @@ export interface ServerDhcp {
   leases: DhcpLease[];
 }
 
+export interface DnsRecord {
+  name: string;
+  type: 'A' | 'CNAME' | 'NS';
+  /** IP for A records, target name for CNAME / NS */
+  value: string;
+}
+
+/** HTTP and DNS services on a Server-PT */
+export interface ServerServices {
+  http: boolean;
+  /** file name → HTML */
+  pages: Record<string, string>;
+  dns: boolean;
+  records: DnsRecord[];
+}
+
 export interface HomeRouterState {
   lanIp: string;
   lanMask: string;
@@ -149,6 +165,8 @@ export interface Device {
   ssid?: string;
   /** DHCP service (servers) */
   dhcpService?: ServerDhcp;
+  /** HTTP / DNS services (servers) */
+  services?: ServerServices;
   /** IOS devices (routers, switches) */
   ios?: IosState;
   /** Linksys-style home routers */

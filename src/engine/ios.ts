@@ -303,6 +303,10 @@ export interface Session {
   vlan?: number[];
   history: string[];
   pending?: Pending;
+  /** a Telnet/SSH session into this device (instead of the console) */
+  vty?: { ip: string; proto: 'telnet' | 'ssh' };
+  /** set when a remote session has ended */
+  closed?: boolean;
 }
 
 export const newSession = (): Session => ({ mode: 'user', history: [] });
@@ -857,6 +861,7 @@ function execCommon(user: boolean): CmdSpec<Ctx>[] {
       pattern: 'enable',
       run: (c) => {
         if (c.s.mode === 'priv') return;
+      if (c.s.vty && !c.ios.enableSecret && !c.ios.enablePassword) return '% No password set.\n';
       if (c.ios.enableSecret || c.ios.enablePassword) {
           c.s.pending = { kind: 'enable', tries: 0 };
           return '';
@@ -878,6 +883,10 @@ function execCommon(user: boolean): CmdSpec<Ctx>[] {
 }
 
 function logout(c: Ctx) {
+  if (c.s.vty) {
+    c.s.closed = true;
+    return `\n[Connection to ${c.s.vty.ip} closed by foreign host]\n`;
+  }
   c.s.mode = 'user';
   c.s.pending = { kind: 'press-return' };
   return `\n\n\n\n${c.ios.hostname} con0 is now available\n\n\n\n\n\nPress RETURN to get started.\n`;
@@ -1506,8 +1515,8 @@ G.add('vlan', [
 
 const CONFIG_MODES: Mode[] = ['config', 'if', 'pool', 'line', 'router', 'vlan'];
 
-function consoleLogin(d: Device) {
-  const con = d.ios ? linesOf(d, d.ios).find((l) => l.name === 'con 0') : undefined;
+function consoleLogin(d: Device, which: 'con' | 'vty' = 'con') {
+  const con = d.ios ? linesOf(d, d.ios).find((l) => (which === 'con' ? l.name === 'con 0' : l.name.startsWith('vty'))) : undefined;
   const login = con?.cmds.find((c) => c.startsWith('login'));
   if (!login) return null;
   if (login === 'login local') return 'local';
@@ -1549,12 +1558,16 @@ function answer(p: Project, d: Device, s: Session, line: string): string {
       return head + (line.trim() ? exec(p, d, s, line) : '');
     }
     case 'login': {
-      const pw = consoleLogin(d);
+      const pw = consoleLogin(d, s.vty ? 'vty' : 'con');
       if (typeof pw === 'string' && checkPassword(pw, line)) {
         s.pending = undefined;
         return '';
       }
       if (++pend.tries >= 3) {
+        if (s.vty) {
+          s.closed = true;
+          return `% Bad passwords\n\n[Connection to ${s.vty.ip} closed by foreign host]\n`;
+        }
         s.pending = { kind: 'press-return' };
         return '% Bad passwords\n\n';
       }
@@ -1570,6 +1583,10 @@ function answer(p: Project, d: Device, s: Session, line: string): string {
         return '';
       }
       const tries = pend.tries + 1;
+      if (s.vty && (tries >= 3 || s.vty.proto === 'ssh')) {
+        s.closed = true;
+        return `% Login invalid\n\n[Connection to ${s.vty.ip} closed by foreign host]\n`;
+      }
       s.pending = tries >= 3 ? { kind: 'press-return' } : { kind: 'login-user', tries };
       return '% Login invalid\n\n';
     }
@@ -1713,3 +1730,45 @@ export const keywords = (m: Mode) =>
     .split('\n')
     .map((l) => l.trim().split(/\s+/)[0])
     .filter((w) => w && w !== '<cr>');
+
+/* ================================================================== */
+/*  Telnet / SSH into a device                                         */
+/* ================================================================== */
+
+export interface Remote {
+  dev?: Device;
+  session?: Session;
+  out: string;
+}
+
+/** Open a Telnet or SSH session from `client` to `ip`, checking reachability and the VTY lines. */
+export function openRemote(p: Project, client: Device, ip: string, proto: 'telnet' | 'ssh', user?: string): Remote {
+  const head = proto === 'telnet' ? `Trying ${ip} ...` : '';
+  const fail = (msg: string) => ({ out: `${head ? head + '\n' : ''}${msg}\n` });
+  if (!isIp(ip)) return fail(`% Unknown command or computer name, or unable to find computer address`);
+  if (!ping(p, client.id, ip).ok) return fail('% Connection timed out; remote host not responding');
+  const d = p.devices.find((x) => x.ifaces.some((i) => i.ip === ip && !i.shutdown));
+  if (!d?.ios || !d.powered) return fail('% Connection refused by remote host');
+  const ios = d.ios;
+  const vty = linesOf(d, ios).find((l) => l.name.startsWith('vty'));
+  const transport = vty?.cmds.find((c) => c.startsWith('transport input'))?.slice(16).split(/\s+/) ?? ['all'];
+  const allowed = transport.includes('all') || transport.includes(proto);
+  if (!allowed || transport.includes('none')) return fail('% Connection refused by remote host');
+  if (proto === 'ssh' && !ios.rsaBits) return fail('% Connection refused by remote host');
+  const s: Session = { mode: 'user', history: [], vty: { ip, proto } };
+  const how = consoleLogin(d, 'vty');
+  let out = head ? `${head}Open\n` : '';
+  if (proto === 'ssh') {
+    // SSH always authenticates a user: the local database with "login local", otherwise the line password
+    if (how === 'local' || how === null) s.pending = { kind: 'login-pass', tries: 2, user: user ?? '' };
+    else if (how === 'nopass') return fail('% Connection refused by remote host');
+    else s.pending = { kind: 'login', tries: 2 };
+    return { dev: d, session: s, out };
+  }
+  out += motd(d);
+  if (how === 'nopass') return { out: out + '\n\nPassword required, but none set\n\n[Connection to ' + ip + ' closed by foreign host]\n' };
+  if (how === 'local') s.pending = { kind: 'login-user', tries: 0 };
+  else if (how !== null) s.pending = { kind: 'login', tries: 0 };
+  if (s.pending) out += '\n\nUser Access Verification\n\n';
+  return { dev: d, session: s, out };
+}

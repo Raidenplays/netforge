@@ -2,11 +2,12 @@
  * Map Packet Tracer XML (decoded by the Rust backend) to a NetForge project and back.
  * Export patches the original XML so everything NetForge doesn't model is preserved.
  */
-import { emptyIos } from '../model/catalog';
+import { emptyIos, isConsolePort } from '../model/catalog';
 import { randomMac } from '../model/ip';
-import type { Activity, CableType, Device, DeviceKind, GradeItem, Iface, Link, Media, Project } from '../model/types';
+import type { Activity, CableType, Device, DeviceKind, GradeItem, Iface, Link, Media, Project, ServerServices } from '../model/types';
 import { uid } from '../model/types';
 import { parseRunningConfig, runningConfigForPkt } from '../engine/ios';
+import { defaultServices } from '../engine/services';
 
 const KIND: Record<string, DeviceKind> = {
   Router: 'router',
@@ -103,6 +104,58 @@ function collectPorts(mod: Element | null, path: number[] = [], out: RawPort[] =
   kids(mod, 'PORT').forEach((el, index) => out.push({ el, type: txt(el, 'TYPE'), path, index }));
   kids(mod, 'SLOT').forEach((slot, si) => kids(slot, 'MODULE').forEach((m) => collectPorts(m, [...path, si], out)));
   return out;
+}
+
+const on = (v: string) => v === '1' || v === 'true';
+
+/** a Server-PT's HTTP pages and DNS records */
+function readServices(engine: Element, name: string): ServerServices {
+  const svc = defaultServices(name);
+  const http = kid(engine, 'HTTP_SERVER');
+  if (http) svc.http = on(txt(http, 'ENABLED'));
+  const pages: Record<string, string> = {};
+  for (const fc of Array.from(engine.getElementsByTagName('FILE_CONTENT')))
+    if (fc.getAttribute('class') === 'CHttpPage') pages[txt(fc.parentElement, 'NAME')] = txt(fc, 'TEXT');
+  if (Object.keys(pages).length) svc.pages = pages;
+  const dns = kid(engine, 'DNS_SERVER');
+  if (dns) {
+    svc.dns = on(txt(dns, 'ENABLED'));
+    svc.records = kids(kid(dns, 'NAMESERVER-DATABASE'), 'RESOURCE-RECORD').filter((r) => ['A-REC', 'CNAME', 'NS'].includes(txt(r, 'TYPE'))).map((r) => {
+      const type = txt(r, 'TYPE');
+      return type === 'A-REC'
+        ? { name: txt(r, 'NAME'), type: 'A' as const, value: txt(r, 'IPADDRESS') }
+        : { name: txt(r, 'NAME'), type: type === 'NS' ? ('NS' as const) : ('CNAME' as const), value: txt(r, 'SERVER-NAME') || txt(r, 'HOSTNAME') };
+    });
+  }
+  return svc;
+}
+
+function writeServices(doc: Document, engine: Element, svc: ServerServices) {
+  const http = kid(engine, 'HTTP_SERVER');
+  if (http) setTxt(http, 'ENABLED', svc.http ? '1' : '0');
+  for (const fc of Array.from(engine.getElementsByTagName('FILE_CONTENT'))) {
+    if (fc.getAttribute('class') !== 'CHttpPage') continue;
+    const page = svc.pages[txt(fc.parentElement, 'NAME')];
+    if (page !== undefined) setTxt(fc, 'TEXT', page);
+  }
+  const dns = kid(engine, 'DNS_SERVER');
+  if (!dns) return;
+  setTxt(dns, 'ENABLED', svc.dns ? '1' : '0');
+  const db = kid(dns, 'NAMESERVER-DATABASE');
+  if (!db) return;
+  // records NetForge doesn't model (e.g. AAAA) are kept
+  for (const r of kids(db, 'RESOURCE-RECORD')) if (['A-REC', 'CNAME', 'NS'].includes(txt(r, 'TYPE'))) db.removeChild(r);
+  const mk = (tag: string, text: string) => {
+    const e = doc.createElement(tag);
+    e.textContent = text;
+    return e;
+  };
+  for (const r of svc.records) {
+    const rr = doc.createElement('RESOURCE-RECORD');
+    rr.append(mk('TYPE', r.type === 'A' ? 'A-REC' : r.type === 'NS' ? 'NS' : 'CNAME'), mk('NAME', r.name), mk('TTL', '86400'));
+    rr.append(mk(r.type === 'A' ? 'IPADDRESS' : r.type === 'NS' ? 'SERVER-NAME' : 'HOSTNAME', r.value));
+    db.appendChild(rr);
+  }
 }
 
 /** the VLANS element of the device's flash:vlan.dat, if it has one */
@@ -296,6 +349,7 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
         };
       }
       if (ifaces.some((i) => i.media === 'wireless')) d.ssid = txt(engine, 'WIRELESS_CLIENT/WIRELESS_COMMON/SSID') || 'Default';
+      if (kind === 'server') d.services = readServices(engine!, name);
     }
     if (kind === 'other' || kind === 'cloud') warnings.push(`${name} (${type}) is shown but not simulated.`);
     devices.push(d);
@@ -317,6 +371,7 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
       return;
     }
     const fix = (d: Device, n: string) => {
+      if (isConsolePort(n)) return n;
       const hit = d.ifaces.find((i) => i.name === n) ?? d.ifaces.find((i) => i.name.replace(/\s/g, '') === n.replace(/\s/g, ''));
       if (hit) return hit.name;
       // port naming we don't derive yet: trust the name on the cable
@@ -447,6 +502,7 @@ export function exportPkt(p: Project): ExportReport {
         setTxt(svc, 'ENABLED', d.dhcpService.enabled ? '1' : '0');
       }
       setTxt(engine, 'DNS_CLIENT/SERVER_IP', d.dns ?? '');
+      if (d.services) writeServices(doc, engine, d.services);
       if (d.ssid !== undefined) setTxt(engine, 'WIRELESS_CLIENT/WIRELESS_COMMON/SSID', d.ssid);
     }
   }

@@ -1,22 +1,26 @@
 import { isIp } from '../model/ip';
 import type { Device, Project } from '../model/types';
 import { ping, renew } from './network';
+import { ownerOf, resolve } from './services';
 
 export const hostPrompt = () => 'C:\\>';
 
-export const HOST_CMDS = ['arp', 'cls', 'help', 'hostname', 'ipconfig', 'ping', 'tracert', 'exit'];
+export const HOST_CMDS = ['arp', 'cls', 'help', 'hostname', 'ipconfig', 'nslookup', 'ping', 'ssh', 'telnet', 'tracert', 'exit'];
+
+/** addresses each host has already reached (for the first-ping ARP loss) */
+const hostArp = new Map<string, Set<string>>();
 
 /** Mutates p (immer draft) for ipconfig /renew. Returns output; '\f' clears the screen. */
 export function hostExec(p: Project, d: Device, line: string): string {
   const w = line.trim().split(/\s+/);
   const c = (w[0] ?? '').toLowerCase();
   if (!c) return '';
-  const i = d.ifaces.find((x) => !x.shutdown) ?? d.ifaces[0];
+  const i = d.ifaces.find((x) => !x.shutdown && x.media !== 'console') ?? d.ifaces[0];
 
   switch (c) {
     case 'help':
     case '?':
-      return 'Available commands:\n  arp -a\n  cls\n  hostname\n  ipconfig [/all | /renew | /release]\n  ping <ip> [-n count]\n  tracert <ip>\n';
+      return 'Available commands:\n  arp -a\n  cls\n  hostname\n  ipconfig [/all | /renew | /release]\n  nslookup <name>\n  ping <ip or name> [-n count]\n  ssh -l <username> <ip>\n  telnet <ip>\n  tracert <ip or name>\n';
     case 'cls':
       return '\f';
     case 'hostname':
@@ -46,24 +50,48 @@ export function hostExec(p: Project, d: Device, line: string): string {
         )
         .join('');
     }
+    case 'nslookup': {
+      if (!w[1]) return 'Usage: nslookup <name>\n';
+      const r = resolve(p, d, w[1]);
+      const srv = d.dns || '0.0.0.0';
+      return r.ok ? `\nServer: [${srv}]\nAddress:  ${srv}\n\nNon-authoritative answer:\nName:   ${w[1]}\nAddress:  ${r.ip}\n\n` : `\nServer: [${srv}]\nAddress:  ${srv}\n\nDNS request timed out.\n   timeout was 15000 milli seconds.\n*** UnKnown can't find ${w[1]}: Non-existent domain\n`;
+    }
     case 'ping': {
-      const target = w.find((x, k) => k > 0 && isIp(x));
       const nIdx = w.findIndex((x) => x === '-n');
       const n = nIdx > 0 ? Math.max(1, Math.min(20, Number(w[nIdx + 1]) || 4)) : 4;
-      if (!target) return w[1] ? `Ping request could not find host ${w[1]}. Please check the name and try again.\n` : 'Usage: ping <ip> [-n count]\n';
+      const arg = w.find((x, k) => k > 0 && !x.startsWith('-') && w[k - 1] !== '-n');
+      if (!arg) return 'Usage: ping <ip or name> [-n count]\n';
+      let target = arg;
+      if (!isIp(arg)) {
+        const look = resolve(p, d, arg);
+        if (!look.ok) return `Ping request could not find host ${arg}. Please check the name and try again.\n`;
+        target = look.ip;
+      }
       const r = ping(p, d.id, target);
-      let out = `\nPinging ${target} with 32 bytes of data:\n\n`;
+      const owner = ownerOf(p, target);
+      const ttl = (owner && (owner.ios || owner.home) ? 255 : 128) - Math.max(0, r.routers.filter((x) => x.ip !== target).length);
+      // the first echo through a router is often lost while ARP resolves
+      const seen = hostArp.get(d.id) ?? hostArp.set(d.id, new Set()).get(d.id)!;
+      const cold = r.ok && r.routers.length > 0 && !seen.has(target);
+      if (r.ok) seen.add(target);
+      let out = `\nPinging ${isIp(arg) ? target : `${arg} [${target}]`} with 32 bytes of data:\n\n`;
       for (let k = 0; k < n; k++) {
-        if (r.ok) out += `Reply from ${target}: bytes=32 time${r.hops.length > 2 ? '=' + r.hops.length + 'ms' : '<1ms'} TTL=${128 - r.routers.length}\n`;
+        if (r.ok && !(cold && k === 0)) out += `Reply from ${target}: bytes=32 time${r.hops.length > 2 ? '=' + r.hops.length + 'ms' : '<1ms'} TTL=${ttl}\n`;
+        else if (r.ok) out += 'Request timed out.\n';
         else out += r.reason?.startsWith('Destination') ? `Reply from ${r.srcIp}: Destination host unreachable.\n` : 'Request timed out.\n';
       }
-      const ok = r.ok ? n : 0;
+      const ok = r.ok ? n - (cold ? 1 : 0) : 0;
       out += `\nPing statistics for ${target}:\n    Packets: Sent = ${n}, Received = ${ok}, Lost = ${n - ok} (${Math.round(((n - ok) / n) * 100)}% loss),\n`;
       return out;
     }
     case 'tracert': {
-      const target = w[1];
-      if (!isIp(target)) return 'Usage: tracert <ip>\n';
+      let target = w[1];
+      if (!target) return 'Usage: tracert <ip or name>\n';
+      if (!isIp(target)) {
+        const look = resolve(p, d, target);
+        if (!look.ok) return `Unable to resolve target system name ${target}.\n`;
+        target = look.ip;
+      }
       const r = ping(p, d.id, target);
       let out = `\nTracing route to ${target} over a maximum of 30 hops: \n\n`;
       let k = 1;

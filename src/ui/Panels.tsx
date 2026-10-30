@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore, type Tool } from '../store';
 import { DeviceGlyph, I } from './Icons';
+import { SimControls, SimPanel } from './Sim';
 import { TEMPLATES } from '../model/catalog';
 
 /* ---------------- library ---------------- */
@@ -86,9 +87,7 @@ export function Library() {
 export function BottomPanel() {
   const mode = useStore((s) => s.mode);
   const log = useStore((s) => s.log);
-  const flight = useStore((s) => s.flight);
   const open = useStore((s) => s.bottomOpen);
-  const speed = useStore((s) => s.speed);
   const set = useStore((s) => s.set);
   const body = useRef<HTMLDivElement>(null);
   const sim = mode === 'simulation';
@@ -97,50 +96,12 @@ export function BottomPanel() {
     if (!sim) body.current?.scrollTo({ top: body.current.scrollHeight });
   }, [log, sim]);
 
-  const curEv = flight ? (flight.hops[flight.step]?.ev ?? Infinity) : -1;
-  const finished = flight && flight.step >= flight.hops.length;
 
   return (
-    <section className={`bottom ${open ? '' : 'collapsed'}`}>
+    <section className={`bottom ${open ? '' : 'collapsed'} ${sim ? 'simulating' : ''}`}>
       <div className="bottom-head">
         <span className="title">{sim ? 'Simulation' : 'Activity'}</span>
-        {sim && (
-          <>
-            <button
-              className="btn icon sm"
-              title="Reset"
-              disabled={!flight}
-              onClick={() => flight && set({ flight: { ...flight, step: 0, playing: false } })}
-            >
-              <I.reset size={15} />
-            </button>
-            <button
-              className="btn icon sm"
-              title={flight?.playing ? 'Pause' : 'Play'}
-              disabled={!flight || !!finished}
-              onClick={() => flight && set({ flight: { ...flight, playing: !flight.playing } })}
-            >
-              {flight?.playing ? <I.pause size={15} /> : <I.play size={15} />}
-            </button>
-            <button
-              className="btn icon sm"
-              title="Step forward"
-              disabled={!flight || !!finished}
-              onClick={() => flight && set({ flight: { ...flight, step: Math.min(flight.hops.length, flight.step + 1), playing: false } })}
-            >
-              <I.step size={15} />
-            </button>
-            <div className="speed">
-              Speed
-              <input type="range" min={0.25} max={3} step={0.25} value={speed} onChange={(e) => set({ speed: +e.target.value })} />
-            </div>
-            {flight && (
-              <span className={`pill ${finished ? (flight.ok ? 'good' : 'bad') : ''}`} style={{ marginLeft: 6 }}>
-                {finished ? (flight.ok ? 'Delivered' : 'Failed') : `Hop ${Math.min(flight.step + 1, flight.hops.length)} / ${flight.hops.length}`}
-              </span>
-            )}
-          </>
-        )}
+        {sim && <SimControls />}
         <span className="spacer" />
         {!sim && log.length > 0 && (
           <button className="btn sm" onClick={() => set({ log: [] })}>
@@ -154,43 +115,7 @@ export function BottomPanel() {
       {open && (
         <div className="bottom-body" ref={body}>
           {sim ? (
-            flight ? (
-              <table className="events">
-                <thead>
-                  <tr>
-                    <th style={{ width: 36 }}>#</th>
-                    <th style={{ width: 70 }}>Type</th>
-                    <th style={{ width: 150 }}>At device</th>
-                    <th>Details</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {flight.events.map((e, i) => (
-                    <tr
-                      key={i}
-                      className={i === curEv ? 'now' : i > curEv ? 'future' : ''}
-                      ref={i === curEv ? (el) => el?.scrollIntoView({ block: 'nearest' }) : undefined}
-                    >
-                      <td className="mono">{i + 1}</td>
-                      <td>
-                        <span className={`proto ${e.kind}`}>{e.kind}</span>
-                      </td>
-                      <td>
-                        {e.at}
-                        {e.to ? ` → ${e.to}` : ''}
-                      </td>
-                      <td className="mono" style={{ color: e.ok ? undefined : 'var(--bad)' }}>
-                        {e.info}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div className="blank">
-                Pick the <b>Ping</b> tool (P), click a source then a destination. Packets wait here so you can step through every ARP, NAT and ICMP event.
-              </div>
-            )
+            <SimPanel />
           ) : log.length ? (
             <table className="events">
               <tbody>

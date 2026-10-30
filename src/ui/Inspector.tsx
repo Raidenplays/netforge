@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store';
 import { DeviceGlyph, I } from './Icons';
 import { Terminal } from './Terminal';
+import { Desktop } from './Desktop';
 import type { Device, Iface, Project } from '../model/types';
 import { buildTopo, ifaceStatus, renew } from '../engine/network';
 import { runningConfig } from '../engine/ios';
@@ -107,7 +108,11 @@ export function Inspector() {
           </button>
         ))}
       </div>
-      {tab === 'cli' && (dev.ios || isHost(dev)) ? (
+      {tab === 'cli' && isHost(dev) ? (
+        <div className="insp-body flush">
+          <Desktop key={dev.id} dev={dev} ipConfig={<HostConfig dev={dev} edit={edit} />} />
+        </div>
+      ) : tab === 'cli' && dev.ios ? (
         <div className="insp-body flush">
           <Terminal dev={dev} />
         </div>

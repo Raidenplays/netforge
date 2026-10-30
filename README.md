@@ -16,7 +16,7 @@ simulation mode) and wraps them in an interface that feels like a current app:
 - **Undo / redo** for everything, including CLI changes
 - **Inspector panel** instead of modal windows: Overview, Config and CLI tabs right beside the topology
 - **Live link lights** (green = up, red = down / shutdown) and toggleable port labels
-- **Simulation mode** with play, pause, step and speed controls and an ARP / NAT / ICMP event table
+- **Simulation mode** with play, pause, step forward and back, an event list with filters, a **packet inspector** (OSI layers in and out, plus every header field) and a list of saved pings you can fire again
 
 ## What it simulates
 
@@ -25,11 +25,11 @@ simulation mode) and wraps them in an interface that feels like a current app:
 | Devices | Routers (1941, 2911, 4331, incl. EHWIC switch ports), switches (2960, 3650, Switch-PT), PCs, laptops, servers, printers, tablets, phones, access points, Linksys-style home Wi-Fi routers. Cell towers and central office servers are shown but not simulated |
 | Layer 2 | Cables, switching / bridging, VLANs (access ports, 802.1Q trunks with native and allowed VLANs, DTP-style trunk negotiation), Wi-Fi association by SSID and range |
 | Layer 3 | Static IPs, default gateways, connected and static routes (longest-prefix match), switch SVIs, router-on-a-stick subinterfaces (`encapsulation dot1Q`) |
-| Services | DHCP (IOS pools, excluded addresses, home-router DHCP, Server-PT DHCP service, `ip helper-address` relay), NAT overload (IOS `ip nat inside/outside`, home routers) |
+| Services | HTTP and DNS (A, CNAME) on servers, DHCP (IOS pools, excluded addresses, home-router DHCP, Server-PT DHCP service, `ip helper-address` relay), NAT overload (IOS `ip nat inside/outside`, home routers) |
 | IOS CLI | A command grammar per mode (exec, global, interface/subinterface, line, router, DHCP pool, VLAN) with IOS behaviour: abbreviations, `?` context help, Tab completion, `% Invalid input` with the caret under the bad word, `% Incomplete` / `% Ambiguous`, `no` and `do` forms, and config stored in full (`sw mo acc` → `switchport mode access`). Covers device basics (`hostname`, `enable secret`/`password`, `line con/vty` with `password` + `login` / `login local`, `service password-encryption`, `banner motd`, `username`), SSH setup (`ip domain-name`, `crypto key generate rsa`, `ip ssh version`, `transport input`), interfaces, IPv4/IPv6 addressing, static routes, DHCP, NAT, VLANs and trunks, and saving (`copy run start`, `write`, `erase startup-config`, `reload`). Password prompts, console login and the `.!!!!` first ping work like the real thing. Hashes match Packet Tracer's, so `enable secret class` produces the same line a .pkt has |
-| Host prompt | `ipconfig [/all /renew /release]`, `ping [-n]`, `tracert` |
+| PCs and servers | A **Desktop** of apps: IP Configuration, Command Prompt (`ipconfig`, `ping` by IP or name, `tracert`, `nslookup`, `telnet`, `ssh`), Terminal over a console cable, Telnet / SSH client, Web Browser, PC Wireless, and on servers the HTTP and DNS services |
 
-Not yet: dynamic routing protocols (RIP/OSPF/EIGRP commands are accepted and saved but not run), ACL enforcement, IPv6 forwarding (addresses are configured and shown, not routed), SSH/Telnet sessions between devices, and servers' HTTP/DNS/email services.
+See [docs/PARITY.md](docs/PARITY.md) for the full checklist against Packet Tracer. Not yet: dynamic routing protocols (RIP/OSPF/EIGRP commands are accepted and saved but not run), ACL enforcement, IPv6 forwarding (addresses are configured and shown, not routed), SSH/Telnet sessions between devices, and servers' HTTP/DNS/email services.
 
 ## Activities (.pka)
 

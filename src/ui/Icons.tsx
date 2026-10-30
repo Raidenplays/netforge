@@ -176,6 +176,25 @@ export const I = {
       <path d="M5 5v14l10-7zM19 5v14" />
     </S>
   ),
+  back: (p: P) => (
+    <S {...p}>
+      <path d="M19 5v14L9 12zM5 5v14" />
+    </S>
+  ),
+  eye: (p: P) => (
+    <S {...p}>
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
+      <circle cx="12" cy="12" r="2.8" />
+    </S>
+  ),
+  apps: (p: P) => (
+    <S {...p}>
+      <rect x="4" y="4" width="6" height="6" rx="1.5" />
+      <rect x="14" y="4" width="6" height="6" rx="1.5" />
+      <rect x="4" y="14" width="6" height="6" rx="1.5" />
+      <rect x="14" y="14" width="6" height="6" rx="1.5" />
+    </S>
+  ),
   reset: (p: P) => (
     <S {...p}>
       <path d="M3.5 12a8.5 8.5 0 1 0 2.5-6" />
