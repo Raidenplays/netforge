@@ -67,7 +67,7 @@ export function hostExec(p: Project, d: Device, line: string): string {
         if (!look.ok) return `Ping request could not find host ${arg}. Please check the name and try again.\n`;
         target = look.ip;
       }
-      const r = ping(p, d.id, target);
+      const r = ping(p, d.id, target, { count: true });
       const owner = ownerOf(p, target);
       const ttl = (owner && (owner.ios || owner.home) ? 255 : 128) - Math.max(0, r.routers.filter((x) => x.ip !== target).length);
       // the first echo through a router is often lost while ARP resolves
@@ -78,7 +78,7 @@ export function hostExec(p: Project, d: Device, line: string): string {
       for (let k = 0; k < n; k++) {
         if (r.ok && !(cold && k === 0)) out += `Reply from ${target}: bytes=32 time${r.hops.length > 2 ? '=' + r.hops.length + 'ms' : '<1ms'} TTL=${ttl}\n`;
         else if (r.ok) out += 'Request timed out.\n';
-        else out += r.reason?.startsWith('Destination') ? `Reply from ${r.srcIp}: Destination host unreachable.\n` : 'Request timed out.\n';
+        else out += r.reason?.startsWith('Destination') ? `Reply from ${r.unreachFrom ?? r.srcIp}: Destination host unreachable.\n` : 'Request timed out.\n';
       }
       const ok = r.ok ? n - (cold ? 1 : 0) : 0;
       out += `\nPing statistics for ${target}:\n    Packets: Sent = ${n}, Received = ${ok}, Lost = ${n - ok} (${Math.round(((n - ok) / n) * 100)}% loss),\n`;

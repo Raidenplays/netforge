@@ -35,7 +35,7 @@ export function resolve(p: Project, client: Device, host: string): Lookup {
   const dnsIp = client.dns;
   if (!dnsIp || !isIp(dnsIp) || dnsIp === '0.0.0.0') return { ok: false, error: 'no DNS server is configured' };
   const server = ownerOf(p, dnsIp);
-  if (!server?.services?.dns || !server.powered || !ping(p, client.id, dnsIp).ok) return { ok: false, error: `DNS server ${dnsIp} didn't answer` };
+  if (!server?.services?.dns || !server.powered || !ping(p, client.id, dnsIp, { l4: { proto: 'udp', sport: 1025, dport: 53 } }).ok) return { ok: false, error: `DNS server ${dnsIp} didn't answer` };
   let want = name.toLowerCase();
   for (let hops = 0; hops < 8; hops++) {
     const rec = server.services.records.find((r) => r.name.toLowerCase() === want && (r.type === 'A' || r.type === 'CNAME'));
@@ -65,7 +65,7 @@ export function httpGet(p: Project, client: Device, rawUrl: string): HttpResult 
   const look = resolve(p, client, host);
   if (!look.ok) return { ok: false, url, status: 'Host Name Unresolved', html: errorPage('Host Name Unresolved', `The name ${host} could not be resolved: ${look.error}.`) };
   const server = ownerOf(p, look.ip);
-  if (!ping(p, client.id, look.ip).ok || !server?.powered)
+  if (!ping(p, client.id, look.ip, { l4: { proto: 'tcp', sport: 1025, dport: 80 }, count: true }).ok || !server?.powered)
     return { ok: false, url, status: 'Request Timeout', html: errorPage('Request Timeout', `${look.ip} didn't respond. Check cabling, addresses, gateways and routes.`) };
   if (!server.services?.http)
     return { ok: false, url, status: 'Connection refused', html: errorPage('Connection refused', `${server.name} (${look.ip}) isn't running a web server.`) };

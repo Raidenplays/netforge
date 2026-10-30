@@ -3,7 +3,9 @@ import { classfulMask, inNet, intToIp, isIp, isMask, maskToPrefix, network, pref
 import type { Device, Iface, IosState, LineCfg, Project, Vlan } from '../model/types';
 import { caretError, Grammar, ifaceName, IF_TYPES, type CmdSpec, type ParsedArgs } from './grammar';
 import { checkPassword, md5crypt, type7Encode } from './iospw';
-import { buildTopo, ifaceStatus, ping } from './network';
+import { buildTopo, controlPlane, ifaceStatus, ping } from './network';
+import { ospfRouterId, protocolsOf } from './routing';
+import { aclAllows, clearAclHits, isExtendedNumber, isStandardNumber, parseAce, showAccessLists, type Ace } from './acl';
 
 /* ================================================================== */
 /*  Defaults                                                           */
@@ -160,8 +162,9 @@ export function parseRunningConfig(text: string, d: Device) {
       ios.pools.push({ name: m[1] });
       block = { kind: 'pool', name: m[1] };
     } else if ((m = l.match(/^ip dhcp excluded-address (\S+)(?: (\S+))?/))) ios.excluded.push({ from: m[1], to: m[2] ?? m[1] });
-    else if ((m = l.match(/^ip route (\S+) (\S+) (\S+)/))) {
-      ios.routes.push(isIp(m[3]) ? { network: m[1], mask: m[2], via: m[3] } : { network: m[1], mask: m[2], iface: m[3] });
+    else if ((m = l.match(/^ip route (\S+) (\S+) (\S+)(?: (\d+))?/))) {
+      const distance = m[4] ? Number(m[4]) : undefined;
+      ios.routes.push(isIp(m[3]) ? { network: m[1], mask: m[2], via: m[3], distance } : { network: m[1], mask: m[2], iface: m[3], distance });
     } else if (/^ip nat inside source/.test(l) || /^ip nat pool/.test(l)) ios.natRules.push(l);
     else if ((m = l.match(/^ip default-gateway (\S+)/))) ios.defaultGateway = m[1];
     else if (l === 'ip classless' || /^no service (timestamps|password-encryption)/.test(l)) continue;
@@ -228,7 +231,7 @@ export function runningConfigLines(d: Device, delim = '^C'): string[] {
   }
   if (s.defaultGateway) out.push(`ip default-gateway ${s.defaultGateway}`, '!');
   if (d.kind === 'router') out.push('ip classless');
-  for (const r of s.routes) out.push(`ip route ${r.network} ${r.mask} ${r.via ?? r.iface}`);
+  for (const r of s.routes) out.push(`ip route ${r.network} ${r.mask} ${r.via ?? r.iface}${r.distance ? ` ${r.distance}` : ''}`);
   for (const r of s.natRules) out.push(r);
   out.push('!');
   for (const l of s.extraPost) out.push(l);
@@ -279,7 +282,7 @@ export function loadConfig(d: Device, text: string | undefined) {
 /*  CLI session                                                        */
 /* ================================================================== */
 
-export type Mode = 'user' | 'priv' | 'config' | 'if' | 'pool' | 'line' | 'router' | 'vlan';
+export type Mode = 'user' | 'priv' | 'config' | 'if' | 'pool' | 'line' | 'router' | 'vlan' | 'acl';
 
 type Pending =
   | { kind: 'press-return' }
@@ -301,6 +304,8 @@ export interface Session {
   /** router block header, e.g. "router ospf 1" */
   router?: string;
   vlan?: number[];
+  /** named ACL being edited, e.g. "ip access-list extended WEB" */
+  acl?: string;
   history: string[];
   pending?: Pending;
   /** a Telnet/SSH session into this device (instead of the console) */
@@ -360,6 +365,8 @@ export function prompt(d: Device, s: Session) {
       return `${h}(config-router)#`;
     case 'vlan':
       return `${h}(config-vlan)#`;
+    case 'acl':
+      return `${h}(config-${s.acl?.includes(' extended ') ? 'ext' : 'std'}-nacl)#`;
   }
 }
 
@@ -610,34 +617,136 @@ function showIpv6IntBrief(p: Project, d: Device) {
   return out.join('\n') + '\n';
 }
 
-function showIpRoute(p: Project, d: Device) {
+function showIpRoute(p: Project, d: Device, only?: string) {
   if (d.kind === 'switch' && !d.ios?.extraPost.includes('ip routing')) {
     return d.ios?.defaultGateway ? `Default gateway is ${d.ios.defaultGateway}\n\nHost               Gateway           Last Use    Total Uses  Interface\nICMP redirect cache is empty\n` : 'Default gateway is not set\n\nHost               Gateway           Last Use    Total Uses  Interface\nICMP redirect cache is empty\n';
   }
   const t = buildTopo(p);
-  const lines = [
-    'Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP',
-    '       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area',
-    '       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2',
-    '       E1 - OSPF external type 1, E2 - OSPF external type 2, E - EGP',
-    '       i - IS-IS, L1 - IS-IS level-1, L2 - IS-IS level-2, ia - IS-IS inter area',
-    '       * - candidate default, U - per-user static route, o - ODR',
-    '       P - periodic downloaded static route',
-    '',
-  ];
-  const def = d.ios?.routes.find((r) => r.network === '0.0.0.0' && r.mask === '0.0.0.0');
-  lines.push(def ? `Gateway of last resort is ${def.via ?? '0.0.0.0'} to network 0.0.0.0` : 'Gateway of last resort is not set', '');
-  const eps = t.endpoints.filter((e) => e.dev.id === d.id);
-  for (const e of eps) {
-    const pre = maskToPrefix(e.mask);
-    lines.push(`C       ${intToIp(network(e.ip, e.mask))}/${pre} is directly connected, ${e.iface}`);
-    lines.push(`L       ${e.ip}/32 is directly connected, ${e.iface}`);
+  const rib = (controlPlane(t).ribs.get(d.id) ?? []).filter((r) => !only || r.code.startsWith(only));
+  const lines = only
+    ? []
+    : [
+        'Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP',
+        '       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area',
+        '       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2',
+        '       E1 - OSPF external type 1, E2 - OSPF external type 2, E - EGP',
+        '       i - IS-IS, L1 - IS-IS level-1, L2 - IS-IS level-2, ia - IS-IS inter area',
+        '       * - candidate default, U - per-user static route, o - ODR',
+        '       P - periodic downloaded static route',
+        '',
+      ];
+  const def = rib.find((r) => r.network === '0.0.0.0' && r.mask === '0.0.0.0');
+  if (!only) lines.push(def ? `Gateway of last resort is ${def.via ?? '0.0.0.0'} to network 0.0.0.0` : 'Gateway of last resort is not set', '');
+  const ip = (s: string) => ipToNum(s);
+  // group by classful major network, like IOS
+  const groups = new Map<string, typeof rib>();
+  for (const r of [...rib].sort((a, b) => ip(a.network) - ip(b.network) || maskToPrefix(a.mask) - maskToPrefix(b.mask) || (a.code === 'L' ? 1 : -1))) {
+    const major = r.network === '0.0.0.0' ? '0.0.0.0' : intToIp(network(r.network, classfulMask(r.network)));
+    (groups.get(major) ?? groups.set(major, []).get(major)!).push(r);
   }
-  for (const r of d.ios?.routes ?? []) {
-    const pre = maskToPrefix(r.mask);
-    lines.push(`S${pre === 0 ? '*' : ' '}      ${r.network}/${pre} ${r.via ? `[1/0] via ${r.via}` : `is directly connected, ${r.iface}`}`);
+  const fmt = (r: (typeof rib)[number], indent: boolean) => {
+    const code = r.code.padEnd(indent ? 8 : 5);
+    const dest = `${r.network}/${maskToPrefix(r.mask)}`;
+    if (r.code === 'C' || r.code === 'L') return `${code}${dest} is directly connected, ${r.iface}`;
+    if (!r.via) return `${code}${dest} is directly connected, ${r.iface}`;
+    const tail = r.code.startsWith('S') ? '' : `, 00:00:${String(10 + (ip(r.via) % 40)).padStart(2, '0')}, ${r.iface}`;
+    return `${code}${dest} [${r.ad}/${r.metric}] via ${r.via}${tail}`;
+  };
+  for (const [major, rs] of groups) {
+    const cm = classfulMask(major);
+    const subnets = rs.filter((r) => r.mask !== cm || r.network !== major);
+    if (major !== '0.0.0.0' && subnets.length && !(rs.length === 1 && rs[0].mask === cm)) {
+      const masks = new Set(rs.map((r) => r.mask));
+      lines.push(
+        masks.size > 1
+          ? `     ${major}/${maskToPrefix(cm)} is variably subnetted, ${rs.length} subnets, ${masks.size} masks`
+          : `     ${major}/${maskToPrefix(cm)} is subnetted, ${rs.length} subnets`,
+      );
+      // routes with several equal-cost next hops print the extra ones on their own lines
+      let last = '';
+      for (const r of rs) {
+        const k = r.network + r.mask + r.code;
+        lines.push(k === last && r.via ? `${' '.repeat(8 + `${r.network}/${maskToPrefix(r.mask)}`.length)} [${r.ad}/${r.metric}] via ${r.via}, 00:00:12, ${r.iface}` : fmt(r, true));
+        last = k;
+      }
+    } else for (const r of rs) lines.push(fmt(r, false));
   }
   return lines.join('\n') + '\n';
+}
+
+const ipToNum = (s: string) => s.split('.').reduce((n, o) => n * 256 + Number(o), 0);
+
+function showIpProtocols(p: Project, d: Device) {
+  const pr = protocolsOf(d);
+  const t = buildTopo(p);
+  const cp = controlPlane(t);
+  const out: string[] = [];
+  const nbrs = (proto: 'ospf' | 'eigrp' | 'rip') =>
+    cp.adj.filter((a) => a.proto === proto && (a.a.id === d.id || a.b.id === d.id)).map((a) => (a.a.id === d.id ? a.bIp : a.aIp));
+  for (const o of pr.ospf) {
+    out.push(`Routing Protocol is "ospf ${o.pid}"`, '  Outgoing update filter list for all interfaces is not set', '  Incoming update filter list for all interfaces is not set');
+    out.push(`  Router ID ${ospfRouterId(d, o)}`, `  Number of areas in this router is ${new Set(o.networks.map((n) => n.area)).size}. ${new Set(o.networks.map((n) => n.area)).size} normal 0 stub 0 nssa`, '  Maximum path: 4', '  Routing for Networks:');
+    for (const n of o.networks) out.push(`    ${n.ip} ${n.wild} area ${n.area}`);
+    if (o.passive.size) out.push(o.passiveDefault ? '  Passive Interface(s): (default)' : `  Passive Interface(s):`, ...[...o.passive].map((x) => `    ${d.ifaces.find((i) => i.name.toLowerCase() === x)?.name ?? x}`));
+    out.push('  Routing Information Sources:', '    Gateway         Distance      Last Update');
+    for (const ip of nbrs('ospf')) out.push(`    ${ip.padEnd(16)}110           00:00:12`);
+    out.push('  Distance: (default is 110)', '');
+  }
+  for (const e of pr.eigrp) {
+    out.push(`Routing Protocol is "eigrp  ${e.as} "`, '  Outgoing update filter list for all interfaces is not set', '  Incoming update filter list for all interfaces is not set', '  Default networks flagged in outgoing updates', '  Default networks accepted from incoming updates', '  EIGRP metric weight K1=1, K2=0, K3=1, K4=0, K5=0', '  EIGRP maximum hopcount 100', '  EIGRP maximum metric variance 1', `  Automatic network summarization is ${e.autoSummary ? '' : 'not '}in effect`, '  Maximum path: 4', '  Routing for Networks:');
+    for (const n of e.networks) out.push(`     ${n.ip}${n.wild ? ` ${n.wild}` : ''}`);
+    out.push('  Routing Information Sources:', '    Gateway         Distance      Last Update');
+    for (const ip of nbrs('eigrp')) out.push(`    ${ip.padEnd(16)}90            00:00:12`);
+    out.push('  Distance: internal 90 external 170', '');
+  }
+  if (pr.rip) {
+    const r = pr.rip;
+    out.push('Routing Protocol is "rip"', 'Sending updates every 30 seconds, next due in 12 seconds', 'Invalid after 180 seconds, hold down 180, flushed after 240', '  Outgoing update filter list for all interfaces is not set', '  Incoming update filter list for all interfaces is not set', '  Redistributing: rip', `  Default version control: send version ${r.version}, receive ${r.version === 2 ? '2' : 'any version'}`);
+    out.push(`  Automatic network summarization is ${r.autoSummary ? '' : 'not '}in effect`, '  Maximum path: 4', '  Routing for Networks:', ...r.networks.map((n) => `	${n}`));
+    if (r.passive.size) out.push('  Passive Interface(s):', ...[...r.passive].map((x) => `	${d.ifaces.find((i) => i.name.toLowerCase() === x)?.name ?? x}`));
+    out.push('  Routing Information Sources:', '	Gateway         Distance      Last Update');
+    for (const ip of nbrs('rip')) out.push(`	${ip.padEnd(16)}120           00:00:12`);
+    out.push('  Distance: (default is 120)', '');
+  }
+  return out.length ? out.join('\n') + '\n' : '';
+}
+
+/** OSPF neighbours as `show ip ospf neighbor` lists them (DR/BDR elected per multi-access link) */
+function ospfNeighbors(p: Project, d: Device) {
+  const t = buildTopo(p);
+  const cp = controlPlane(t);
+  const mine = cp.adj.filter((a) => a.proto === 'ospf' && (a.a.id === d.id || a.b.id === d.id));
+  const rows = ['', 'Neighbor ID     Pri   State           Dead Time   Address         Interface'];
+  for (const a of mine) {
+    const peer = a.a.id === d.id ? a.b : a.a;
+    const myIf = a.a.id === d.id ? a.aIf : a.bIf;
+    const peerIp = a.a.id === d.id ? a.bIp : a.aIp;
+    const iface = d.ifaces.find((i) => i.name === myIf);
+    let role = '-';
+    if (iface?.media !== 'serial') {
+      // everyone on this link, ranked by router ID (all priorities default to 1)
+      const onLink = cp.adj.filter((x) => x.proto === 'ospf' && ((x.a.id === d.id && x.aIf === myIf) || (x.b.id === d.id && x.bIf === myIf)));
+      const ids = [d, ...onLink.map((x) => (x.a.id === d.id ? x.b : x.a))].map((x) => ({ id: x.id, rid: ospfRouterId(x, protocolsOf(x).ospf[0]) }));
+      ids.sort((x, y) => ipToNum(y.rid) - ipToNum(x.rid));
+      role = ids[0].id === peer.id ? 'DR' : ids[1]?.id === peer.id ? 'BDR' : 'DROTHER';
+    }
+    rows.push(`${pad(ospfRouterId(peer, protocolsOf(peer).ospf[0]), 16)}${pad('1', 6)}${pad(`FULL/${role === '-' ? '  -' : role}`, 16)}${pad('00:00:3' + (ipToNum(peerIp) % 10), 12)}${pad(peerIp, 16)}${myIf}`);
+  }
+  return rows.join('\n') + '\n';
+}
+
+function eigrpNeighbors(p: Project, d: Device) {
+  const t = buildTopo(p);
+  const cp = controlPlane(t);
+  const pr = protocolsOf(d).eigrp[0];
+  const mine = cp.adj.filter((a) => a.proto === 'eigrp' && (a.a.id === d.id || a.b.id === d.id));
+  const rows = [`IP-EIGRP neighbors for process ${pr?.as ?? 1}`, 'H   Address         Interface      Hold Uptime    SRTT   RTO   Q   Seq', '                                   (sec)          (ms)        Cnt  Num'];
+  mine.forEach((a, k) => {
+    const peerIp = a.a.id === d.id ? a.bIp : a.aIp;
+    const myIf = a.a.id === d.id ? a.aIf : a.bIf;
+    rows.push(`${pad(String(k), 4)}${pad(peerIp, 16)}${pad(short(myIf), 15)}${pad('14', 5)}00:01:2${k}   40     1000  0   ${10 + k}`);
+  });
+  return rows.join('\n') + '\n';
 }
 
 function showVlanBrief(d: Device) {
@@ -691,11 +800,11 @@ function showInterfaces(p: Project, d: Device, only?: Iface) {
 
 function iosPing(p: Project, d: Device, target: string) {
   if (!isIp(target)) return `% Unrecognized host or address, or protocol not running.\n\n`;
-  const r = ping(p, d.id, target);
+  const r = ping(p, d.id, target, { count: true });
   const seen = arpSeen.get(d.id) ?? arpSeen.set(d.id, new Set()).get(d.id)!;
   const cold = r.ok && !seen.has(target);
   if (r.ok) seen.add(target);
-  const marks = r.ok ? (cold ? '.!!!!' : '!!!!!') : '.....';
+  const marks = r.ok ? (cold ? '.!!!!' : '!!!!!') : r.unreachFrom ? 'U.U.U' : '.....';
   const ok = r.ok ? (cold ? 4 : 5) : 0;
   return (
     `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${target}, timeout is 2 seconds:\n${marks}\n` +
@@ -797,6 +906,18 @@ const showCmds = (priv: boolean): CmdSpec<Ctx>[] => {
     S('ip interface brief', (c) => showIpIntBrief(c.p, c.d)),
     S('ip interface', (c) => showIpIntBrief(c.p, c.d), true),
     S('ip route', (c) => showIpRoute(c.p, c.d)),
+    S('ip route static', (c) => showIpRoute(c.p, c.d, 'S')),
+    S('ip route connected', (c) => showIpRoute(c.p, c.d, 'C')),
+    S('ip route ospf', (c) => showIpRoute(c.p, c.d, 'O')),
+    S('ip route rip', (c) => showIpRoute(c.p, c.d, 'R')),
+    S('ip route eigrp', (c) => showIpRoute(c.p, c.d, 'D')),
+    S('ip protocols', (c) => showIpProtocols(c.p, c.d)),
+    S('ip ospf neighbor', (c) => ospfNeighbors(c.p, c.d)),
+    S('ip ospf', (c) => {
+      const o = protocolsOf(c.d).ospf[0];
+      return o ? ` Routing Process "ospf ${o.pid}" with ID ${ospfRouterId(c.d, o)}\n Supports only single TOS(TOS0) routes\n Supports opaque LSA\n SPF schedule delay 5 secs, Hold time between two SPFs 10 secs\n Number of areas in this router is ${new Set(o.networks.map((n) => n.area)).size}. ${new Set(o.networks.map((n) => n.area)).size} normal 0 stub 0 nssa\n Reference bandwidth unit is ${o.refBw} mbps\n` : '';
+    }),
+    S('ip eigrp neighbors', (c) => eigrpNeighbors(c.p, c.d)),
     S('ip dhcp binding', (c) => {
       const rows = ['IP address       Client-ID/              Lease expiration        Type', '                 Hardware address'];
       for (const l of c.ios.leases) rows.push(`${pad(l.ip, 17)}${pad(l.mac, 24)}--                      Automatic`);
@@ -825,7 +946,9 @@ const showCmds = (priv: boolean): CmdSpec<Ctx>[] => {
     S('users', () => '    Line       User       Host(s)              Idle       Location\n*  0 con 0                idle                 00:00:00 \n'),
     S('flash:', (c) => `System flash directory:\nFile  Length   Name/status\n  1  33591768 ${c.d.model.toLowerCase()}.bin\n[33591768 bytes used, 30424616 available, 64016384 total]\n`),
     S('protocols', (c) => `Global values:\n  Internet Protocol routing is ${c.d.kind === 'router' ? 'enabled' : 'disabled'}\n` + c.d.ifaces.filter((i) => i.media !== 'wireless').map((i) => `${i.name} is ${i.shutdown ? 'administratively down' : 'up'}, line protocol is ${i.shutdown ? 'down' : 'up'}\n${i.ip ? `  Internet address is ${i.ip}/${maskToPrefix(i.mask!)}\n` : ''}`).join('')),
-    S('access-lists', (c) => c.ios.extraPost.filter((l) => l.startsWith('access-list')).join('\n') + '\n'),
+    S('access-lists', (c) => showAccessLists(c.d)),
+    S('access-lists WORD', (c, a) => showAccessLists(c.d, a.v[0])),
+    S('ip access-lists', (c) => showAccessLists(c.d)),
     S('vlan brief', (c) => (sw(c.d) ? showVlanBrief(c.d) : caretError(prompt(c.d, c.s).length, c.line, 1))),
     S('vlan', (c) => (sw(c.d) ? showVlanBrief(c.d) : caretError(prompt(c.d, c.s).length, c.line, 1))),
     S('interfaces trunk', (c) => (sw(c.d) ? showIntTrunk(c.p, c.d) : caretError(prompt(c.d, c.s).length, c.line, 2))),
@@ -910,6 +1033,7 @@ G.add('priv', [
   { pattern: 'erase startup-config', run: (c) => void (c.s.pending = { kind: 'confirm', text: 'Erasing the nvram filesystem will remove all configuration files! Continue? [confirm]', action: 'erase' }) },
   { pattern: 'write erase', run: (c) => void (c.s.pending = { kind: 'confirm', text: 'Erasing the nvram filesystem will remove all configuration files! Continue? [confirm]', action: 'erase' }), hidden: true },
   { pattern: 'reload', run: (c) => void (c.s.pending = { kind: 'confirm', text: 'Proceed with reload? [confirm]', action: 'reload' }) },
+  { pattern: 'clear access-list counters', run: (c) => void clearAclHits(c.d.id) },
   { pattern: 'clear LINE', run: () => '' },
   { pattern: 'clock set LINE', run: () => '' },
   { pattern: 'debug LINE', run: () => '' },
@@ -937,7 +1061,7 @@ function exitMode(c: Ctx) {
     return `\n%SYS-5-CONFIG_I: Configured from console by console\n`;
   }
   c.s.mode = 'config';
-  c.s.iface = c.s.pool = c.s.line = c.s.router = c.s.vlan = undefined;
+  c.s.iface = c.s.pool = c.s.line = c.s.router = c.s.vlan = c.s.acl = undefined;
 }
 
 const setEnable = (kind: 'secret' | 'password', type?: string) =>
@@ -976,7 +1100,7 @@ function enterIface(c: Ctx, a: ParsedArgs, range: boolean) {
   }
   c.s.mode = 'if';
   c.s.iface = r.map((i) => i.name);
-  c.s.pool = c.s.line = c.s.router = c.s.vlan = undefined;
+  c.s.pool = c.s.line = c.s.router = c.s.vlan = c.s.acl = undefined;
 }
 
 function enterLine(c: Ctx, kind: 'con' | 'aux' | 'vty', from: number, to?: number) {
@@ -1123,18 +1247,11 @@ const cfgGlobal: CmdSpec<Ctx>[] = [
   { pattern: 'vlan VLANLIST', run: vlanCmd },
   {
     pattern: 'ip route A.B.C.D A.B.C.D NEXTHOP',
-    run: (c, a) => {
-      const [net, mask, via] = a.v;
-      if (!isMask(mask)) return '%Inconsistent address and mask\n';
-      const nw = intToIp(network(net, mask));
-      if (nw !== net) return '%Inconsistent address and mask\n';
-      const viaIp = isIp(via);
-      const ifn = viaIp ? undefined : ifaceName(via);
-      if (!viaIp && !c.d.ifaces.some((i) => i.name.toLowerCase() === ifn?.toLowerCase())) return '% Invalid interface type and number\n';
-      const iface = c.d.ifaces.find((i) => i.name.toLowerCase() === ifn?.toLowerCase())?.name;
-      c.ios.routes = c.ios.routes.filter((r) => !(r.network === nw && r.mask === mask && (r.via === via || r.iface === iface)));
-      if (!c.negate) c.ios.routes.push(viaIp ? { network: nw, mask, via } : { network: nw, mask, iface });
-    },
+    run: (c, a) => staticRoute(c, a),
+  },
+  {
+    pattern: 'ip route A.B.C.D A.B.C.D NEXTHOP <1-255>',
+    run: (c, a) => staticRoute(c, a),
   },
   {
     pattern: 'ip default-gateway A.B.C.D',
@@ -1172,7 +1289,8 @@ const cfgGlobal: CmdSpec<Ctx>[] = [
   { pattern: 'ip routing', run: (c) => replaceGlobal(c, 'ip routing', c.negate ? undefined : 'ip routing') },
   { pattern: 'ip cef', run: store('pre') },
   { pattern: 'ip classless', run: () => '' },
-  { pattern: 'ip access-list LINE', run: store('post') },
+  { pattern: 'ip access-list standard WORD', run: (c, a) => namedAcl(c, 'standard', a.v[0]) },
+  { pattern: 'ip access-list extended WORD', run: (c, a) => namedAcl(c, 'extended', a.v[0]) },
   { pattern: 'ip http LINE', run: store('post') },
   { pattern: 'ip host LINE', run: store('pre') },
   { pattern: 'ip scp LINE', run: store('post') },
@@ -1190,7 +1308,14 @@ const cfgGlobal: CmdSpec<Ctx>[] = [
   { pattern: 'security passwords min-length <0-16>', run: store('pre') },
   { pattern: 'login block-for LINE', run: store('pre') },
   { pattern: 'login LINE', run: store('pre'), hidden: true },
-  { pattern: 'access-list LINE', run: store('post') },
+  { pattern: 'access-list <1-2699> permit LINE', run: (c, a) => numberedAce(c, a, 'permit') },
+  { pattern: 'access-list <1-2699> deny LINE', run: (c, a) => numberedAce(c, a, 'deny') },
+  { pattern: 'access-list <1-2699> remark LINE', run: (c, a) => void (!c.negate && c.ios.extraPost.push(`access-list ${a.v[0]} remark ${a.v[1]}`)) },
+  {
+    pattern: 'access-list <1-2699>',
+    hidden: true,
+    run: (c, a) => (c.negate ? void (c.ios.extraPost = c.ios.extraPost.filter((l) => !l.startsWith(`access-list ${a.v[0]} `))) : INCOMPLETE),
+  },
   { pattern: 'spanning-tree LINE', run: store('pre') },
   { pattern: 'cdp run', run: (c) => replaceGlobal(c, 'cdp run', c.negate ? 'no cdp run' : undefined) },
   { pattern: 'lldp run', run: store('post') },
@@ -1205,6 +1330,90 @@ const cfgGlobal: CmdSpec<Ctx>[] = [
   { pattern: 'errdisable LINE', run: store('post') },
   { pattern: 'default LINE', run: () => '' },
 ];
+
+function staticRoute(c: Ctx, a: ParsedArgs) {
+  const [net, mask, via, dist] = a.v;
+  if (!isMask(mask)) return '%Inconsistent address and mask\n';
+  const nw = intToIp(network(net, mask));
+  if (nw !== net) return '%Inconsistent address and mask\n';
+  const viaIp = isIp(via);
+  const ifn = viaIp ? undefined : ifaceName(via);
+  if (!viaIp && !c.d.ifaces.some((i) => i.name.toLowerCase() === ifn?.toLowerCase())) return '% Invalid interface type and number\n';
+  const iface = c.d.ifaces.find((i) => i.name.toLowerCase() === ifn?.toLowerCase())?.name;
+  c.ios.routes = c.ios.routes.filter((r) => !(r.network === nw && r.mask === mask && (r.via === via || r.iface === iface)));
+  if (c.negate) return;
+  const distance = dist ? Number(dist) : undefined;
+  c.ios.routes.push(viaIp ? { network: nw, mask, via, distance } : { network: nw, mask, iface, distance });
+}
+
+/** canonical text of an entry, as IOS stores it in the running-config */
+function aceConfig(ace: Ace, extended: boolean) {
+  if (extended) return ace.text;
+  const a = ace.src;
+  return `${ace.action} ${a.wild === '255.255.255.255' ? 'any' : a.wild === '0.0.0.0' ? `host ${a.ip}` : `${a.ip} ${a.wild}`}`;
+}
+
+/** zero the host bits under the wildcard, as IOS does when it stores an entry */
+function normalizeWords(words: string[]) {
+  return words.map((w, k) => (isIp(w) && isIp(words[k + 1]) && words[k - 1] !== 'host' ? intToIp((ipToNum(w) & ~ipToNum(words[k + 1])) >>> 0) : w));
+}
+
+function numberedAce(c: Ctx, a: ParsedArgs, action: 'permit' | 'deny') {
+  const n = Number(a.v[0]);
+  const extended = isExtendedNumber(n);
+  if (!extended && !isStandardNumber(n)) return caretError(prompt(c.d, c.s).length, c.line, 1);
+  const words = normalizeWords(a.v[1].split(/\s+/));
+  const ace = parseAce(words, extended, 0, action);
+  if ('errAt' in ace) return caretError(prompt(c.d, c.s).length, c.line, ace.errAt + 3 + (c.negate ? 1 : 0));
+  const line = `access-list ${n} ${aceConfig(ace, extended)}`;
+  if (c.negate) {
+    // "no access-list N ..." removes the whole list, like IOS
+    c.ios.extraPost = c.ios.extraPost.filter((l) => !l.startsWith(`access-list ${n} `));
+    return;
+  }
+  if (!c.ios.extraPost.includes(line)) {
+    // keep a list's lines together
+    const last = c.ios.extraPost.map((l, k) => (l.startsWith(`access-list ${n} `) ? k : -1)).filter((k) => k >= 0).pop();
+    if (last === undefined) c.ios.extraPost.push(line);
+    else c.ios.extraPost.splice(last + 1, 0, line);
+  }
+}
+
+function namedAcl(c: Ctx, kind: 'standard' | 'extended', name: string) {
+  const header = `ip access-list ${kind} ${name}`;
+  if (c.negate) {
+    const b = blockLines(c.ios.extraPost, header);
+    if (b) c.ios.extraPost.splice(b.at, b.end - b.at);
+    return;
+  }
+  if (!blockLines(c.ios.extraPost, header)) c.ios.extraPost.push(header);
+  c.s.mode = 'acl';
+  c.s.acl = header;
+}
+
+function namedAce(c: Ctx, a: ParsedArgs, action: 'permit' | 'deny', seqArg?: string) {
+  if (!c.s.acl) return;
+  const extended = c.s.acl.includes(' extended ');
+  const words = normalizeWords(a.v[a.v.length - 1].split(/\s+/));
+  const ace = parseAce(words, extended, 0, action);
+  if ('errAt' in ace) return caretError(prompt(c.d, c.s).length, c.line, ace.errAt + (seqArg ? 2 : 1));
+  const b = blockLines(c.ios.extraPost, c.s.acl)!;
+  const body = c.ios.extraPost.slice(b.at + 1, b.end);
+  const seqs = body.map((l) => Number(l.trim().split(' ')[0])).filter((x) => !Number.isNaN(x));
+  const seq = seqArg ? Number(seqArg) : (Math.max(0, ...seqs) + 10);
+  if (seqs.includes(seq)) return '% Duplicate sequence number\n';
+  const text = aceConfig(ace, extended);
+  if (body.some((l) => l.trim().replace(/^\d+ /, '') === text)) return '% Duplicate access-list entry\n';
+  const next = [...body, ` ${seq} ${text}`].sort((x, y) => Number(x.trim().split(' ')[0]) - Number(y.trim().split(' ')[0]));
+  c.ios.extraPost.splice(b.at + 1, b.end - b.at - 1, ...next);
+}
+
+function accessGroupCmd(c: Ctx, name: string, dir: 'in' | 'out') {
+  for (const i of curIfaces(c)) {
+    i.extra = (i.extra ?? []).filter((e) => !(e.startsWith('ip access-group ') && e.endsWith(` ${dir}`)));
+    if (!c.negate) i.extra.push(`ip access-group ${name} ${dir}`);
+  }
+}
 
 function excl(c: Ctx, from: string, to: string) {
   if (c.negate) c.ios.excluded = c.ios.excluded.filter((x) => x.from !== from);
@@ -1312,7 +1521,8 @@ const cfgIf: CmdSpec<Ctx>[] = [
   { pattern: 'ip nat inside', run: (c) => void curIfaces(c).forEach((i) => (i.natRole = c.negate ? undefined : 'inside')) },
   { pattern: 'ip nat outside', run: (c) => void curIfaces(c).forEach((i) => (i.natRole = c.negate ? undefined : 'outside')) },
   { pattern: 'ip helper-address A.B.C.D', run: ifStore },
-  { pattern: 'ip access-group LINE', run: ifStore },
+  { pattern: 'ip access-group WORD in', run: (c, a) => accessGroupCmd(c, a.v[0], 'in') },
+  { pattern: 'ip access-group WORD out', run: (c, a) => accessGroupCmd(c, a.v[0], 'out') },
   { pattern: 'ip ospf LINE', run: ifStore },
   { pattern: 'ip summary-address LINE', run: ifStore },
   { pattern: 'ip dhcp LINE', run: ifStore },
@@ -1446,15 +1656,51 @@ G.add('line', cfgLine);
 const rtr = cmd((c, a) => {
   if (c.s.router) blockEdit(c.ios.extraPost, c.s.router, a.canonical, c.negate);
 });
+
+/** RIP and classful EIGRP network statements are stored as the major network, like IOS */
+const rtrNetwork = cmd((c, a) => {
+  if (!c.s.router) return;
+  const ip = a.v[0];
+  const classful = c.s.router === 'router rip' || (c.s.router.startsWith('router eigrp') && a.v.length === 1);
+  rtr(c, { ...a, canonical: classful ? `network ${intToIp(network(ip, classfulMask(ip)))}` : a.canonical });
+});
+
+function passive(c: Ctx, iface: string) {
+  if (!c.s.router) return;
+  const b = blockLines(c.ios.extraPost, c.s.router);
+  const byDefault = !!b && c.ios.extraPost.slice(b.at + 1, b.end).includes(' passive-interface default');
+  // under "passive-interface default", IOS records the exceptions as "no passive-interface X"
+  if (byDefault) blockEdit(c.ios.extraPost, c.s.router, `no passive-interface ${iface}`, !c.negate);
+  else blockEdit(c.ios.extraPost, c.s.router, `passive-interface ${iface}`, c.negate);
+}
 G.add('router', [
   ...cfgCommon,
-  { pattern: 'network A.B.C.D', run: rtr },
-  { pattern: 'network A.B.C.D A.B.C.D', run: rtr },
+  { pattern: 'network A.B.C.D', run: rtrNetwork },
+  { pattern: 'network A.B.C.D A.B.C.D', run: rtrNetwork },
   { pattern: 'network A.B.C.D A.B.C.D area <0-4294967295>', run: rtr },
   { pattern: 'version <1-2>', run: rtr },
-  { pattern: 'auto-summary', run: (c) => c.s.router && blockEdit(c.ios.extraPost, c.s.router, c.negate ? 'no auto-summary' : 'auto-summary', false) },
-  { pattern: 'passive-interface IFACE', run: (c, a) => rtr(c, { ...a, canonical: `passive-interface ${ifaceName(a.v[0]) ?? a.v[0]}` }) },
-  { pattern: 'passive-interface default', run: rtr },
+  {
+    pattern: 'auto-summary',
+    run: (c) => {
+      if (!c.s.router) return;
+      blockEdit(c.ios.extraPost, c.s.router, 'auto-summary', true);
+      blockEdit(c.ios.extraPost, c.s.router, 'no auto-summary', true);
+      blockEdit(c.ios.extraPost, c.s.router, c.negate ? 'no auto-summary' : 'auto-summary', false);
+    },
+  },
+  { pattern: 'passive-interface IFACE', run: (c, a) => passive(c, ifaceName(a.v[0]) ?? a.v[0]) },
+  {
+    pattern: 'passive-interface default',
+    run: (c) => {
+      if (!c.s.router) return;
+      const b = blockLines(c.ios.extraPost, c.s.router)!;
+      // switching modes drops the per-interface lines
+      const body = c.ios.extraPost.slice(b.at + 1, b.end).filter((l) => !/^ (no )?passive-interface /.test(l));
+      c.ios.extraPost.splice(b.at + 1, b.end - b.at - 1, ...body);
+      if (!c.negate) blockEdit(c.ios.extraPost, c.s.router, 'passive-interface default', false);
+    },
+  },
+  { pattern: 'auto-cost reference-bandwidth <1-4294967>', run: rtr },
   { pattern: 'router-id A.B.C.D', run: rtr },
   { pattern: 'default-information originate', run: rtr },
   { pattern: 'redistribute LINE', run: rtr },
@@ -1463,6 +1709,27 @@ G.add('router', [
   { pattern: 'maximum-paths <1-16>', run: rtr },
   { pattern: 'distance LINE', run: rtr },
   { pattern: 'timers LINE', run: rtr },
+]);
+
+/* ---------------- named access lists ---------------- */
+
+G.add('acl', [
+  ...cfgCommon,
+  { pattern: 'permit LINE', run: (c, a) => namedAce(c, a, 'permit') },
+  { pattern: 'deny LINE', run: (c, a) => namedAce(c, a, 'deny') },
+  { pattern: '<1-2147483647> permit LINE', run: (c, a) => namedAce(c, a, 'permit', a.v[0]) },
+  { pattern: '<1-2147483647> deny LINE', run: (c, a) => namedAce(c, a, 'deny', a.v[0]) },
+  {
+    pattern: '<1-2147483647>',
+    hidden: true,
+    run: (c, a) => {
+      if (!c.negate || !c.s.acl) return INCOMPLETE;
+      const b = blockLines(c.ios.extraPost, c.s.acl)!;
+      const body = c.ios.extraPost.slice(b.at + 1, b.end).filter((l) => l.trim().split(' ')[0] !== a.v[0]);
+      c.ios.extraPost.splice(b.at + 1, b.end - b.at - 1, ...body);
+    },
+  },
+  { pattern: 'remark LINE', run: () => '' },
 ]);
 
 /* ---------------- dhcp pool ---------------- */
@@ -1513,7 +1780,7 @@ G.add('vlan', [
 /*  exec                                                               */
 /* ================================================================== */
 
-const CONFIG_MODES: Mode[] = ['config', 'if', 'pool', 'line', 'router', 'vlan'];
+const CONFIG_MODES: Mode[] = ['config', 'if', 'pool', 'line', 'router', 'vlan', 'acl'];
 
 function consoleLogin(d: Device, which: 'con' | 'vty' = 'con') {
   const con = d.ios ? linesOf(d, d.ios).find((l) => (which === 'con' ? l.name === 'con 0' : l.name.startsWith('vty'))) : undefined;
@@ -1685,7 +1952,7 @@ export function exec(p: Project, d: Device, s: Session, line: string): string {
       const g = G.parse('config', words);
       if (g.ok) {
         s.mode = 'config';
-        s.iface = s.pool = s.line = s.router = s.vlan = undefined;
+        s.iface = s.pool = s.line = s.router = s.vlan = s.acl = undefined;
         return g.spec.run(ctx, g.args) ?? '';
       }
     }
@@ -1693,7 +1960,43 @@ export function exec(p: Project, d: Device, s: Session, line: string): string {
     if (r.err === 'ambiguous') return `% Ambiguous command: "${trimmed}"\n`;
     return caretError(pl + lead, line.trimStart() === line ? line : line.trimStart(), r.at + (negate ? 1 : 0));
   }
-  return r.spec.run(ctx, r.args) ?? '';
+  const watch = d.ios?.extraPost.some((l) => l.startsWith('router ')) ? adjKeys(p, d) : null;
+  const out = r.spec.run(ctx, r.args) ?? '';
+  return watch ? out + adjChanges(p, d, watch) : out;
+}
+
+/** this device's routing adjacencies, keyed so changes can be reported */
+function adjKeys(p: Project, d: Device) {
+  const cp = controlPlane(buildTopo(p));
+  const out = new Map<string, string[]>();
+  for (const a of cp.adj) {
+    if (a.proto === 'rip' || (a.a.id !== d.id && a.b.id !== d.id)) continue;
+    const meFirst = a.a.id === d.id;
+    const peer = meFirst ? a.b : a.a;
+    const myIf = meFirst ? a.aIf : a.bIf;
+    const peerIp = meFirst ? a.bIp : a.aIp;
+    if (a.proto === 'ospf') {
+      const o = protocolsOf(d).ospf[0];
+      const rid = ospfRouterId(peer, protocolsOf(peer).ospf[0]);
+      out.set(`ospf|${peer.id}|${myIf}`, [
+        `%OSPF-5-ADJCHG: Process ${o?.pid ?? 1}, Nbr ${rid} on ${myIf} from LOADING to FULL, Loading Done`,
+        `%OSPF-5-ADJCHG: Process ${o?.pid ?? 1}, Nbr ${rid} on ${myIf} from FULL to DOWN, Neighbor Down: Interface down or detached`,
+      ]);
+    } else
+      out.set(`eigrp|${peer.id}|${myIf}`, [
+        `%DUAL-5-NBRCHANGE: IP-EIGRP ${a.as}: Neighbor ${peerIp} (${myIf}) is up: new adjacency`,
+        `%DUAL-5-NBRCHANGE: IP-EIGRP ${a.as}: Neighbor ${peerIp} (${myIf}) is down: interface down`,
+      ]);
+  }
+  return out;
+}
+
+function adjChanges(p: Project, d: Device, before: Map<string, string[]>) {
+  const after = adjKeys(p, d);
+  let out = '';
+  for (const [k, [up]] of after) if (!before.has(k)) out += `\n${now()}: ${up}\n`;
+  for (const [k, [, down]] of before) if (!after.has(k)) out += `\n${now()}: ${down}\n`;
+  return out;
 }
 
 /** `?` help for what's been typed so far */
@@ -1746,7 +2049,7 @@ export function openRemote(p: Project, client: Device, ip: string, proto: 'telne
   const head = proto === 'telnet' ? `Trying ${ip} ...` : '';
   const fail = (msg: string) => ({ out: `${head ? head + '\n' : ''}${msg}\n` });
   if (!isIp(ip)) return fail(`% Unknown command or computer name, or unable to find computer address`);
-  if (!ping(p, client.id, ip).ok) return fail('% Connection timed out; remote host not responding');
+  if (!ping(p, client.id, ip, { l4: { proto: 'tcp', sport: 1025, dport: proto === 'ssh' ? 22 : 23 }, count: true }).ok) return fail('% Connection timed out; remote host not responding');
   const d = p.devices.find((x) => x.ifaces.some((i) => i.ip === ip && !i.shutdown));
   if (!d?.ios || !d.powered) return fail('% Connection refused by remote host');
   const ios = d.ios;
@@ -1755,6 +2058,10 @@ export function openRemote(p: Project, client: Device, ip: string, proto: 'telne
   const allowed = transport.includes('all') || transport.includes(proto);
   if (!allowed || transport.includes('none')) return fail('% Connection refused by remote host');
   if (proto === 'ssh' && !ios.rsaBits) return fail('% Connection refused by remote host');
+  // access-class on the VTY lines filters who may connect
+  const cls = vty?.cmds.find((c) => /^access-class \S+ in$/.test(c))?.split(' ')[1];
+  const from = client.ifaces.find((i) => i.ip && !i.shutdown)?.ip ?? '0.0.0.0';
+  if (cls && !aclAllows(d, cls, { src: from, dst: ip, proto: 'tcp', dport: proto === 'ssh' ? 22 : 23 }, true).ok) return fail('% Connection refused by remote host');
   const s: Session = { mode: 'user', history: [], vty: { ip, proto } };
   const how = consoleLogin(d, 'vty');
   let out = head ? `${head}Open\n` : '';

@@ -56,6 +56,8 @@ export interface StaticRoute {
   mask: string;
   via?: string;
   iface?: string;
+  /** administrative distance (floating static routes); unset = 1 */
+  distance?: number;
 }
 
 export interface DhcpPool {

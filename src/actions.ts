@@ -114,7 +114,7 @@ export function runPing(srcId: string, dst: string, label?: string) {
   const p = st().project;
   const src = p.devices.find((d) => d.id === srcId);
   if (!src) return;
-  const r = ping(p, srcId, dst);
+  const r = ping(p, srcId, dst, { count: true });
   const dstName = p.devices.find((d) => d.ifaces.some((i) => i.ip === dst) || d.home?.lanIp === dst || d.home?.wanIp === dst)?.name;
   const text = `${src.name} → ${dstName ? `${dstName} (${dst})` : dst}: ${r.ok ? 'success' : r.reason ?? 'failed'}`;
   st().addLog(r.ok, text);

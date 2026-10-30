@@ -73,8 +73,12 @@ along that is. ✅ done · 🟡 partly done · ❌ not started.
 | VLANs, 802.1Q trunks, router-on-a-stick, SVIs | ✅ | |
 | Inter-VLAN routing on multilayer switches (`ip routing`) | 🟡 | |
 | IPv6 addressing | 🟡 | Configured and shown, not forwarded |
-| RIP, OSPF, EIGRP, BGP | ❌ | Commands are saved but don't run |
-| ACLs (standard, extended, named) | ❌ | Saved but not enforced |
+| RIP v1/v2 | ✅ | Hop counts, classful summarisation, split horizon, passive interfaces, default origination |
+| OSPFv2 | 🟡 | Areas, costs, router IDs, DR/BDR, passive interfaces, default origination, `show ip ospf neighbor`. Not yet: authentication, priorities, stub areas, virtual links, area ranges, timers |
+| EIGRP | 🟡 | AS matching, wildcards, composite metrics, `bandwidth`/`delay`, auto-summary. Not yet: authentication, variance, feasible successors, stub |
+| Administrative distance, floating static routes, recursive static routes | ✅ | |
+| BGP, IS-IS, redistribution | ❌ | |
+| ACLs (standard, extended, named) | ✅ | In/out on interfaces, `access-class` on VTY, sequence numbers, match counters, unreachables. Not yet: IPv6 ACLs, time ranges, reflexive and object-group ACLs |
 | STP / RSTP, EtherChannel, port security, DHCP snooping | ❌ | Saved but not simulated |
 | HSRP, PPP, Frame Relay, GRE, IPsec VPN, ZBF, QoS | ❌ | |
 | Wireless LAN controllers, Meraki, ASA firewall | ❌ | |

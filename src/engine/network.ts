@@ -1,6 +1,8 @@
-import { broadcast, inNet, intToIp, ipToInt, isIp, maskToPrefix, network } from '../model/ip';
+import { broadcast, inNet, intToIp, ipToInt, isIp, network } from '../model/ip';
 import type { Device, Iface, Link, Project } from '../model/types';
 import { isHost } from '../model/catalog';
+import { computeControlPlane, lookup, type ControlPlane } from './routing';
+import { accessGroup, aclAllows, type Pkt as AclPkt } from './acl';
 
 /* ------------------------------------------------------------------ */
 /*  Topology: L2 segments, interface status, L3 endpoints              */
@@ -27,6 +29,8 @@ export interface Topo {
   parent: Map<string, string>;
   adj: Map<string, Edge[]>;
   endpoints: Endpoint[];
+  /** routing tables, filled in on first use */
+  cp?: ControlPlane;
 }
 
 const node = (dev: string, iface: string) => `${dev}::${iface}`;
@@ -292,12 +296,19 @@ interface Fwd {
   viaIface?: boolean;
 }
 
+/** the routing tables, computed once per topology */
+export function controlPlane(t: Topo): ControlPlane {
+  return (t.cp ??= computeControlPlane([...t.devs.values()], t, (n) => segOf(t, n)));
+}
+
+const routes = (d: Device) => d.ios && (d.kind === 'router' || (d.kind === 'switch' && d.ios.extraPost.includes('ip routing')));
+
 function routeLookup(t: Topo, d: Device, dst: string): Fwd | { error: string } {
   const own = t.endpoints.filter((e) => e.dev.id === d.id);
   if (!own.length) return { error: 'no IP address configured' };
 
-  // end hosts and switch SVIs: subnet or default gateway
-  if (isHost(d) || d.kind === 'switch') {
+  // end hosts and layer 2 switches: subnet or default gateway
+  if (isHost(d) || (d.kind === 'switch' && !routes(d))) {
     const e = own[0];
     if (inNet(dst, e.ip, e.mask)) return { egress: e, nextHop: dst };
     const gw = d.kind === 'switch' ? d.ios?.defaultGateway : d.gateway;
@@ -305,33 +316,32 @@ function routeLookup(t: Topo, d: Device, dst: string): Fwd | { error: string } {
     return { egress: e, nextHop: gw };
   }
 
-  // routers & home routers: longest prefix match over connected + static
-  type Cand = { prefix: number; egress: Endpoint; nextHop: string; viaIface?: boolean };
-  const cands: Cand[] = [];
-  for (const e of own) if (inNet(dst, e.ip, e.mask)) cands.push({ prefix: maskToPrefix(e.mask), egress: e, nextHop: dst });
-
-  const routes = [...(d.ios?.routes ?? [])];
-  if (d.home) {
-    const gw = d.home.wanGateway;
-    if (isIp(gw) && gw !== '0.0.0.0') routes.push({ network: '0.0.0.0', mask: '0.0.0.0', via: gw });
-  }
-  for (const r of routes) {
-    if (!inNet(dst, r.network, r.mask)) continue;
-    let egress: Endpoint | undefined;
-    let nh = dst;
-    let viaIface = false;
-    if (r.via) {
-      egress = own.find((e) => inNet(r.via!, e.ip, e.mask));
-      nh = r.via;
-    } else if (r.iface) {
-      egress = own.find((e) => e.iface.toLowerCase() === r.iface!.toLowerCase());
-      viaIface = true;
+  // IOS routers and layer 3 switches: the routing table
+  if (routes(d)) {
+    const rib = controlPlane(t).ribs.get(d.id) ?? [];
+    let r = lookup(rib, dst);
+    if (!r) return { error: 'no route to host' };
+    let nextHop = r.via ?? dst;
+    // recursive lookup when the next hop isn't directly connected
+    for (let k = 0; k < 4 && r.via && !own.some((e) => inNet(r!.via!, e.ip, e.mask)); k++) {
+      const via: string = r.via;
+      const rr = lookup(rib, via);
+      if (!rr || rr === r) return { error: 'no route to host' };
+      r = rr;
+      nextHop = rr.via ?? via;
     }
-    if (egress) cands.push({ prefix: maskToPrefix(r.mask), egress, nextHop: nh, viaIface });
+    const egress = r.via ? own.find((e) => inNet(nextHop, e.ip, e.mask)) : own.find((e) => e.iface.toLowerCase() === (r!.iface ?? '').toLowerCase());
+    if (!egress) return { error: 'no route to host' };
+    const viaIface = !r.via && r.code !== 'C' && r.code !== 'L';
+    return { egress, nextHop: r.via ? nextHop : dst, viaIface };
   }
-  if (!cands.length) return { error: 'no route to host' };
-  cands.sort((a, b) => b.prefix - a.prefix);
-  return { egress: cands[0].egress, nextHop: cands[0].nextHop, viaIface: cands[0].viaIface };
+
+  // home routers: connected LAN/WAN plus the WAN default gateway
+  for (const e of own) if (inNet(dst, e.ip, e.mask)) return { egress: e, nextHop: dst };
+  const gw = d.home?.wanGateway;
+  const wan = own.find((e) => e.iface === 'Internet');
+  if (gw && isIp(gw) && gw !== '0.0.0.0' && wan) return { egress: wan, nextHop: gw };
+  return { error: 'no route to host' };
 }
 
 /** One OSI layer as shown in the packet inspector (index 0 = Layer 1). */
@@ -387,9 +397,19 @@ interface NatEntry {
   outside: string;
 }
 
+/** what the packet carries above IP, for ACL checks */
+export interface L4 {
+  proto: 'icmp' | 'tcp' | 'udp';
+  /** client source port and server port (swapped on the way back) */
+  sport?: number;
+  dport?: number;
+}
+
 interface Leg {
   ok: boolean;
   reason?: string;
+  /** router that answered with "Destination host unreachable" */
+  unreach?: string;
   reachedDev?: Device;
   finalSrc: string;
   routersIn: { dev: Device; ip: string }[];
@@ -450,6 +470,8 @@ function forward(
   hops: Hop[],
   events: SimEvent[],
   arp: Set<string>,
+  l4: L4 = { proto: 'icmp' },
+  count = false,
 ): Leg {
   let cur = start;
   let ingress: Endpoint | undefined;
@@ -480,6 +502,24 @@ function forward(
       outSteps.push(`NAT finds a translation for ${pkt.dst} and changes the destination address to ${back.inside}.`);
       pkt = { ...pkt, dst: back.inside };
     }
+    // inbound access list on the interface the packet arrived on
+    const aclPkt = (): AclPkt => ({
+      src: pkt.src,
+      dst: pkt.dst,
+      proto: l4.proto,
+      sport: reply ? l4.dport : l4.sport,
+      dport: reply ? l4.sport : l4.dport,
+      icmpType: l4.proto === 'icmp' ? icmp : undefined,
+    });
+    const aclIn = cur !== start && ingress && cur.ios ? accessGroup(cur, ingress.iface, 'in') : undefined;
+    if (aclIn && ingress) {
+      const r = aclAllows(cur, aclIn, aclPkt(), count);
+      if (!r.ok) {
+        events.push({ kind: 'ICMP', at: cur.name, info: `Denied by access list ${aclIn} in on ${ingress.iface}`, ok: false });
+        arrival.out = { layers: blank(), steps: [`Access list ${aclIn} is applied inbound on ${ingress.iface} and ${r.ace ? `entry "${r.ace.text}" denies` : 'the implicit deny at the end drops'} the packet.`, 'The router sends back an ICMP Destination Unreachable (administratively prohibited).'] };
+        return { ok: false, reason: `Destination host unreachable (${cur.name})`, unreach: ingress.ip, finalSrc: pkt.src, routersIn };
+      }
+    }
     if (t.endpoints.some((e) => e.dev.id === cur.id && e.ip === pkt.dst)) {
       if (arrival?.in) arrival.in.steps.push(reply ? 'The ICMP process receives the Echo Reply. The ping is complete.' : 'The packet is addressed to this device, so it is processed here.');
       return { ok: true, reachedDev: cur, finalSrc: pkt.src, routersIn };
@@ -494,7 +534,18 @@ function forward(
         ok: false,
       });
       arrival.out = { layers: blank(), steps: [...outSteps, `The device drops the packet: ${f.error}.`] };
-      return { ok: false, reason: cur === start ? f.error : `Destination host unreachable (${cur.name})`, finalSrc: pkt.src, routersIn };
+      return { ok: false, reason: cur === start ? f.error : `Destination host unreachable (${cur.name})`, unreach: cur === start ? undefined : ingress?.ip, finalSrc: pkt.src, routersIn };
+    }
+
+    // outbound access list (not applied to traffic the router creates itself)
+    const aclOut = cur !== start && cur.ios ? accessGroup(cur, f.egress.iface, 'out') : undefined;
+    if (aclOut) {
+      const r = aclAllows(cur, aclOut, aclPkt(), count);
+      if (!r.ok) {
+        events.push({ kind: 'ICMP', at: cur.name, info: `Denied by access list ${aclOut} out on ${f.egress.iface}`, ok: false });
+        arrival.out = { layers: blank(), steps: [`Access list ${aclOut} is applied outbound on ${f.egress.iface} and ${r.ace ? `entry "${r.ace.text}" denies` : 'the implicit deny at the end drops'} the packet.`, 'The router sends back an ICMP Destination Unreachable (administratively prohibited).'] };
+        return { ok: false, reason: `Destination host unreachable (${cur.name})`, unreach: ingress?.ip, finalSrc: pkt.src, routersIn };
+      }
     }
 
     // routers decrement TTL when they forward
@@ -653,13 +704,22 @@ function lastPortOn(t: Topo, path: { links: string[] }, dev: string) {
 export interface PingResult {
   ok: boolean;
   reason?: string;
+  /** address of the router that sent "Destination host unreachable" */
+  unreachFrom?: string;
   srcIp?: string;
   hops: Hop[];
   events: SimEvent[];
   routers: { name: string; ip: string }[];
 }
 
-export function ping(p: Project, srcId: string, dst: string): PingResult {
+export interface PingOpts {
+  /** the transport the "ping" really is (HTTP, DNS, Telnet…) for ACL checks */
+  l4?: L4;
+  /** count ACL hits (user-visible traffic only) */
+  count?: boolean;
+}
+
+export function ping(p: Project, srcId: string, dst: string, opts: PingOpts = {}): PingResult {
   const t = buildTopo(p);
   const src = t.devs.get(srcId);
   const events: SimEvent[] = [];
@@ -675,15 +735,17 @@ export function ping(p: Project, srcId: string, dst: string): PingResult {
 
   const nat: NatEntry[] = [];
   const arp = new Set<string>();
-  const there = forward(t, src, srcEp.ip, dst, false, nat, hops, events, arp);
+  const l4 = opts.l4 ?? { proto: 'icmp' as const };
+  const there = forward(t, src, srcEp.ip, dst, false, nat, hops, events, arp, l4, opts.count);
   stamp(events);
   if (!there.ok || !there.reachedDev)
-    return { ok: false, reason: there.reason, srcIp: srcEp.ip, hops, events, routers: there.routersIn.map((r) => ({ name: r.dev.name, ip: r.ip })) };
-  const back = forward(t, there.reachedDev, dst, there.finalSrc, true, nat, hops, events, arp);
+    return { ok: false, reason: there.reason, unreachFrom: there.unreach, srcIp: srcEp.ip, hops, events, routers: there.routersIn.map((r) => ({ name: r.dev.name, ip: r.ip })) };
+  const back = forward(t, there.reachedDev, dst, there.finalSrc, true, nat, hops, events, arp, l4, opts.count);
   stamp(events);
   return {
     ok: back.ok,
-    reason: back.ok ? undefined : 'Request timed out.',
+    reason: back.ok ? undefined : back.unreach ? back.reason : 'Request timed out.',
+    unreachFrom: back.unreach,
     srcIp: srcEp.ip,
     hops,
     events,
