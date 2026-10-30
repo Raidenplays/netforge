@@ -50,6 +50,9 @@ PACKETTRACER5
    │  │  ├─ GATEWAY, DNS_CLIENT/SERVER_IP            hosts
    │  │  ├─ WIRELESS_CLIENT/WIRELESS_COMMON/SSID     Wi-Fi clients
    │  │  ├─ RUNNINGCONFIG / LINE*, STARTUPCONFIG / LINE*   IOS devices, one LINE per config line
+   │  │  │     (a multi-line `banner motd` is one LINE; its ^C delimiters are 0x03 bytes)
+   │  │  ├─ FILE_MANAGER/…/FILE[NAME=vlan.dat]/FILE_CONTENT[@class=CVlanDatFileContent]
+   │  │  │     VLAN_COUNT, VLANS / VLAN @number @name @rspan     switch VLAN database
    │  │  └─ LAN_IP_ADDRESS, LAN_SUBNET_MASK, START_IP, MAX_USERS,
    │  │     INTERNET_CONNECTION_TYPE, INTERNET_IP_ADDRESS, DHCP_SERVER/ENABLED,
    │  │     WIRELESS_SERVERS/…/SSID                   home routers
@@ -74,3 +77,17 @@ Names aren't stored on ports. Packet Tracer derives them:
   so NetForge treats the radio as on and matches SSIDs.
 - Physical-view-only devices such as *Power Distribution Device* are skipped on import and left
   untouched on export.
+
+## Passwords in configs
+
+Packet Tracer writes `enable secret` and `username … secret` as MD5-crypt (`$1$`) with the fixed salt
+`mERr`, so a given secret always produces the same line (`cisco` → `$1$mERr$hx5rVt7rPNoS4wqbXKX7m0`).
+With `service password-encryption`, line and user passwords use the standard reversible type 7 encoding
+(`cisco` → `0822455D0A16`). NetForge produces the same values, so configs typed in NetForge match
+the ones Packet Tracer saves and grades.
+
+## Compatibility
+
+`pktcodec` and the importer were run over all 299 sample networks bundled with Packet Tracer 9.0.1
+(versions 5.2 to 9.0.1) and the 88 device templates: every file decodes, imports, exports and
+re-imports with the same devices and cables.
