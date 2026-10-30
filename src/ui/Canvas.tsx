@@ -23,6 +23,7 @@ export function Canvas() {
   const pduFrom = useStore((s) => s.pduFrom);
   const showPorts = useStore((s) => s.showPorts);
   const flight = useStore((s) => s.flight);
+  const mode = useStore((s) => s.mode);
   const placing = useStore((s) => s.placing);
   const speed = useStore((s) => s.speed);
   const set = useStore((s) => s.set);
@@ -433,7 +434,21 @@ export function Canvas() {
 
           {/* packet */}
           {packet && (
-            <g className="packet" transform={`translate(${packet.x},${packet.y})`} pointerEvents="none" style={{ color: packet.fail ? 'var(--bad)' : packet.reply ? 'var(--good)' : 'var(--accent)' }}>
+            <g
+              className="packet"
+              transform={`translate(${packet.x},${packet.y})`}
+              pointerEvents={mode === 'simulation' ? 'all' : 'none'}
+              style={{ color: packet.fail ? 'var(--bad)' : packet.reply ? 'var(--good)' : 'var(--accent)', cursor: mode === 'simulation' ? 'pointer' : undefined }}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                // clicking the envelope opens it in the packet inspector, like Packet Tracer
+                e.stopPropagation();
+                if (!flight) return;
+                const ev = flight.hops[Math.min(flight.step, flight.hops.length - 1)]?.ev ?? 0;
+                set({ flight: { ...flight, sel: ev, playing: false }, bottomOpen: true });
+              }}
+            >
+              <title>Click to inspect this packet</title>
               <circle r={13} fill="currentColor" opacity={0.18} />
               <rect x={-9} y={-6.5} width={18} height={13} rx={2.5} fill="currentColor" />
               <path d="M-8 -5 0 1 8 -5" stroke="#fff" strokeWidth={1.5} fill="none" />

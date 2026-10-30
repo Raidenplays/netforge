@@ -170,15 +170,37 @@ function Inspector({ ev, flight, index, onList }: { ev: SimEvent; flight: Flight
   );
 }
 
+/** which OSI layer a step talks about (the step texts are NetForge's own, so this is exact enough) */
+function stepLayer(text: string): number {
+  if (/receives the frame|sends the frame out|forwards the frame out/.test(text)) return 1;
+  if (/MAC|ARP|frame|trunk|VLAN|access port|broadcasts/.test(text)) return 2;
+  if (/ICMP process|ping process|Echo Reply\.|Echo Request to/.test(text)) return 3;
+  return 3;
+}
+
+/** Packet Tracer's OSI Model view: in layers up the stack, out layers down, one layer at a time */
 function Osi({ ev }: { ev: SimEvent }) {
-  const col = (title: string, side?: PduLayers, other?: PduLayers) => (
+  const used = (side?: PduLayers) => [0, 1, 2, 3, 4, 5, 6].filter((k) => side?.layers[k]);
+  const seq: { side: 'in' | 'out'; k: number }[] = [...used(ev.in).map((k) => ({ side: 'in' as const, k })), ...used(ev.out).reverse().map((k) => ({ side: 'out' as const, k }))];
+  const [pos, setPos] = useState(0);
+  useEffect(() => setPos(0), [ev]);
+  const cur = seq[Math.min(pos, seq.length - 1)];
+  const steps = cur ? ((cur.side === 'in' ? ev.in : ev.out)?.steps ?? []).filter((t) => stepLayer(t) === cur.k + 1) : [];
+  const col = (title: string, sideName: 'in' | 'out', side?: PduLayers, other?: PduLayers) => (
     <div className="osi-col">
       <div className="osi-title">{title}</div>
       {[6, 5, 4, 3, 2, 1, 0].map((k) => {
         const text = side?.layers[k] ?? '';
         const changed = !!text && !!other?.layers[k] && other.layers[k] !== text;
+        const picked = cur?.side === sideName && cur.k === k;
+        const at = seq.findIndex((x) => x.side === sideName && x.k === k);
         return (
-          <div key={k} className={`osi-layer ${text ? 'used' : ''} ${changed ? 'changed' : ''}`} title={LAYER_NAMES[k]}>
+          <div
+            key={k}
+            className={`osi-layer ${text ? 'used' : ''} ${changed ? 'changed' : ''} ${picked ? 'picked' : ''}`}
+            title={LAYER_NAMES[k]}
+            onClick={() => at >= 0 && setPos(at)}
+          >
             <span className="n">L{k + 1}</span>
             <span>{text || LAYER_NAMES[k]}</span>
           </div>
@@ -189,15 +211,33 @@ function Osi({ ev }: { ev: SimEvent }) {
   return (
     <>
       <div className="osi">
-        {col('In layers', ev.in, ev.out)}
-        {col('Out layers', ev.out, ev.in)}
+        {col('In layers', 'in', ev.in, ev.out)}
+        {col('Out layers', 'out', ev.out, ev.in)}
       </div>
-      <ol className="osi-steps">
-        {[...(ev.in?.steps ?? []), ...(ev.out?.steps ?? [])].map((s, i) => (
-          <li key={i}>{s}</li>
-        ))}
-        {!ev.in && !ev.out && <li>{ev.info}</li>}
-      </ol>
+      {cur ? (
+        <div className="osi-explain">
+          <div className="osi-title">
+            {cur.side === 'in' ? 'In' : 'Out'} · Layer {cur.k + 1} ({LAYER_NAMES[cur.k]})
+          </div>
+          <ol className="osi-steps">
+            {(steps.length ? steps : ['Nothing else happens at this layer.']).map((t, i) => (
+              <li key={i}>{t}</li>
+            ))}
+          </ol>
+          <div className="osi-nav">
+            <button className="btn sm" disabled={pos === 0} onClick={() => setPos(pos - 1)}>
+              « Previous Layer
+            </button>
+            <button className="btn sm" disabled={pos >= seq.length - 1} onClick={() => setPos(pos + 1)}>
+              Next Layer »
+            </button>
+          </div>
+        </div>
+      ) : (
+        <ol className="osi-steps">
+          <li>{ev.info}</li>
+        </ol>
+      )}
     </>
   );
 }

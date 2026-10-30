@@ -149,10 +149,21 @@ export interface HomeRouterState {
   wanIp: string;
   wanMask: string;
   wanGateway: string;
+  /** the 2.4 GHz network name (same as radios[0].ssid) */
   ssid: string;
-  /** DNS server handed out and used by the router */
+  /** DNS server handed out to DHCP clients (Static DNS 1) */
   dns?: string;
+  /** the router's own DNS server on the Internet setup (DNS 1) */
+  wanDns?: string;
   leases: DhcpLease[];
+  /** 2.4 GHz, 5 GHz-1, 5 GHz-2 */
+  radios?: Radio[];
+}
+
+export interface Radio {
+  ssid: string;
+  enabled: boolean;
+  broadcast: boolean;
 }
 
 export interface Device {

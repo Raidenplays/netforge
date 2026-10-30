@@ -44,7 +44,9 @@ export const ifaceOf = (d: Device | undefined, name: string) => d?.ifaces.find((
 /** Wi-Fi clients associate with the nearest home router in range. */
 export function wirelessLinks(p: Project): Link[] {
   const aps = p.devices.filter((d) => (d.kind === 'homerouter' || d.kind === 'ap') && d.powered);
-  const apSsid = (ap: Device) => (ap.kind === 'ap' ? (ap.ssid ?? 'Default') : ap.home?.ssid);
+  /** the networks an access point or wireless router offers */
+  const apSsids = (ap: Device): string[] =>
+    ap.kind === 'ap' ? [ap.ssid ?? 'Default'] : ap.home?.radios ? ap.home.radios.map((r, k) => ({ ...r, ssid: k === 0 ? ap.home!.ssid : r.ssid })).filter((r) => r.enabled).map((r) => r.ssid) : [ap.home?.ssid ?? 'Default'];
   const apRadio = (ap: Device) => (ap.kind === 'ap' ? (ap.ifaces.find((i) => i.media === 'wireless')?.name ?? 'Port 1') : 'Wireless');
   const out: Link[] = [];
   for (const d of p.devices) {
@@ -54,7 +56,7 @@ export function wirelessLinks(p: Project): Link[] {
     let best: Device | undefined;
     let bd = Infinity;
     for (const ap of aps) {
-      if ((d.ssid ?? 'Default') !== apSsid(ap)) continue;
+      if (!apSsids(ap).includes(d.ssid ?? 'Default')) continue;
       const dist = Math.hypot(ap.x - d.x, ap.y - d.y);
       if (dist < bd && dist <= WIFI_RANGE) {
         bd = dist;

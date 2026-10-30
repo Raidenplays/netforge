@@ -281,19 +281,31 @@ function Wireless({ dev }: { dev: Device }) {
   const mutate = useStore((s) => s.mutate);
   const nets = useMemo(() => {
     const out = new Map<string, { ssid: string; signal: number; ap: string }>();
+    const bands = ['2.4 GHz', '5 GHz-1', '5 GHz-2'];
     for (const ap of project.devices) {
       if (!ap.powered || (ap.kind !== 'homerouter' && ap.kind !== 'ap')) continue;
-      const ssid = ap.kind === 'ap' ? (ap.ssid ?? 'Default') : ap.home?.ssid;
-      if (!ssid) continue;
+      // each enabled radio that broadcasts its name shows up as a network
+      const offered =
+        ap.kind === 'ap'
+          ? [{ ssid: ap.ssid ?? 'Default', band: '' }]
+          : (ap.home?.radios ?? [{ ssid: ap.home!.ssid, enabled: true, broadcast: true }])
+              .map((r, k) => ({ ...r, ssid: k === 0 ? ap.home!.ssid : r.ssid, band: bands[k] }))
+              .filter((r) => r.enabled && r.broadcast);
       const dist = Math.hypot(ap.x - dev.x, ap.y - dev.y);
       const signal = Math.max(0, Math.round(100 - (dist / 520) * 100));
       if (signal <= 0) continue;
-      const cur = out.get(ssid);
-      if (!cur || cur.signal < signal) out.set(ssid, { ssid, signal, ap: ap.name });
+      for (const o of offered) {
+        const cur = out.get(o.ssid);
+        const label = o.band ? `${ap.name} · ${o.band}` : ap.name;
+        if (!cur) out.set(o.ssid, { ssid: o.ssid, signal, ap: label });
+        else if (cur.signal < signal) out.set(o.ssid, { ...cur, signal, ap: label });
+        else if (cur.ap.startsWith(ap.name) && o.band) cur.ap += `, ${o.band}`;
+      }
     }
     return [...out.values()].sort((a, b) => b.signal - a.signal);
   }, [project, dev.x, dev.y]);
   const link = useMemo(() => wirelessLinks(project).find((l) => l.a.dev === dev.id), [project, dev.id]);
+  const [hidden, setHidden] = useState('');
   const w = dev.ifaces.find((i) => i.media === 'wireless');
   return (
     <div className="insp-body">
@@ -345,6 +357,26 @@ function Wireless({ dev }: { dev: Device }) {
         ) : (
           <div className="blank">No wireless networks in range. Move closer to an access point or wireless router.</div>
         )}
+      </div>
+      <div className="section">
+        <h4>Hidden network</h4>
+        <div className="app-form" style={{ padding: 0, border: 0 }}>
+          <input className="input" placeholder="Network name (SSID)" value={hidden} onChange={(e) => setHidden(e.target.value)} style={{ flex: 1 }} />
+          <button
+            className="btn sm"
+            disabled={!hidden.trim()}
+            onClick={() =>
+              mutate((p) => {
+                const d = p.devices.find((x) => x.id === dev.id)!;
+                d.ssid = hidden.trim();
+                const wi = d.ifaces.find((i) => i.media === 'wireless');
+                if (wi && d.dhcpClient) wi.ip = undefined;
+              })
+            }
+          >
+            Connect
+          </button>
+        </div>
       </div>
     </div>
   );

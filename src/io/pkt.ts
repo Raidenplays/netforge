@@ -331,8 +331,15 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
     } else if (kind === 'homerouter') {
       const dhcp = kid(engine, 'DHCP_SERVER');
       const pool = kid(kid(dhcp, 'POOLS'), 'POOL');
-      const ssid = engine!.getElementsByTagName('SSID')[0]?.textContent ?? 'Default';
+      // six wireless networks: 2.4 GHz, 5 GHz-1, 5 GHz-2, each followed by its guest network
+      const servers = kids(kid(engine, 'WIRELESS_SERVERS'), 'WIRELESS_SERVER');
+      const radios = [0, 2, 4]
+        .map((k) => servers[k])
+        .filter(Boolean)
+        .map((sv) => ({ ssid: txt(sv, 'WIRELESS_COMMON/SSID') || 'Default', enabled: txt(sv, 'WIRELESS_COMMON/NETWORK_MODE') !== '0', broadcast: txt(sv, 'SSID_BROADCAST_ENABLED') !== '0' }));
+      const ssid = radios[0]?.ssid ?? engine!.getElementsByTagName('SSID')[0]?.textContent ?? 'Default';
       d.home = {
+        radios: radios.length ? radios : undefined,
         lanIp: txt(engine, 'LAN_IP_ADDRESS') || '192.168.0.1',
         lanMask: txt(engine, 'LAN_SUBNET_MASK') || '255.255.255.0',
         dhcpEnabled: txt(dhcp, 'ENABLED') === '1' || txt(dhcp, 'ENABLED') === 'true',
@@ -344,7 +351,8 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
         wanMask: txt(engine, 'INTERNET_SUBNET_MASK') || '0.0.0.0',
         wanGateway: txt(engine, 'DEFAULT_GATEWAY') || '0.0.0.0',
         ssid,
-        dns: txt(engine, 'DNS_CLIENT/SERVER_IP') || txt(pool, 'DNS_SERVER') || undefined,
+        dns: (txt(pool, 'DNS_SERVER') !== '0.0.0.0' && txt(pool, 'DNS_SERVER')) || txt(engine, 'DNS_CLIENT/SERVER_IP') || undefined,
+        wanDns: txt(engine, 'DNS_CLIENT/SERVER_IP') || undefined,
         leases: kids(kid(pool, 'DHCP_POOL_LEASES'), 'DHCP_POOL_LEASE').map((l) => ({ ip: txt(l, 'IP_ADDRESS'), mac: txt(l, 'MAC_ADDRESS') })),
       };
     } else if (kind === 'ap') {
@@ -542,12 +550,22 @@ export function exportPkt(p: Project): ExportReport {
         setTxt(engine, 'DEFAULT_GATEWAY', h.wanGateway);
       }
       setTxt(kid(engine, 'DHCP_SERVER'), 'ENABLED', h.dhcpEnabled ? '1' : '0');
-      if (h.dns) {
-        setTxt(engine, 'DNS_CLIENT/SERVER_IP', h.dns);
-        setTxt(kid(kid(kid(engine, 'DHCP_SERVER'), 'POOLS'), 'POOL'), 'DNS_SERVER', h.dns);
+      if (h.wanDns ?? h.dns) setTxt(engine, 'DNS_CLIENT/SERVER_IP', (h.wanDns ?? h.dns)!);
+      if (h.dns) setTxt(kid(kid(kid(engine, 'DHCP_SERVER'), 'POOLS'), 'POOL'), 'DNS_SERVER', h.dns);
+      const servers = kids(kid(engine, 'WIRELESS_SERVERS'), 'WIRELESS_SERVER');
+      const radios = h.radios ?? [{ ssid: h.ssid, enabled: true, broadcast: true }];
+      radios.forEach((r, k) => {
+        const sv = servers[k * 2];
+        if (!sv) return;
+        setTxt(sv, 'WIRELESS_COMMON/SSID', k === 0 ? h.ssid : r.ssid);
+        const mode = txt(sv, 'WIRELESS_COMMON/NETWORK_MODE');
+        if ((mode !== '0') !== r.enabled) setTxt(sv, 'WIRELESS_COMMON/NETWORK_MODE', r.enabled ? '7' : '0');
+        setTxt(sv, 'SSID_BROADCAST_ENABLED', r.broadcast ? '1' : '0');
+      });
+      if (!servers.length) {
+        const ssid = engine.getElementsByTagName('SSID')[0];
+        if (ssid) ssid.textContent = h.ssid;
       }
-      const ssid = engine.getElementsByTagName('SSID')[0];
-      if (ssid) ssid.textContent = h.ssid;
     } else if (d.kind === 'ap') {
       const ssid = engine.getElementsByTagName('SSID')[0];
       if (ssid && d.ssid !== undefined) ssid.textContent = d.ssid;

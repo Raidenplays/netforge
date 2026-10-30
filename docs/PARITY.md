@@ -23,7 +23,8 @@ along that is. ✅ done · 🟡 partly done · ❌ not started.
 | Device modules (add/remove HWIC, NM cards) and the Physical tab | ❌ | |
 | Power on/off | ✅ | |
 | Cable types: straight, cross, fiber, serial, console | ✅ | Coaxial, phone and USB cables ❌ |
-| Wireless association by SSID and range | 🟡 | No WPA/WPA2 keys yet |
+| Home router web page (Setup, Wireless, Status, Save Settings) | ✅ | Static/DHCP Internet, LAN, DHCP range, DNS, 2.4 GHz / 5 GHz-1 / 5 GHz-2 SSIDs, SSID broadcast |
+| Wireless association by SSID and range | 🟡 | Per-radio SSIDs and hidden networks; no WPA/WPA2 keys yet |
 
 ## Realtime and simulation
 
@@ -33,7 +34,7 @@ along that is. ✅ done · 🟡 partly done · ❌ not started.
 | Simulation mode: play, pause, step forward and back, speed | ✅ | |
 | Event list (time, last device, at device, type) | ✅ | |
 | Event filters | ✅ | ICMP, ARP, NAT, DHCP |
-| PDU information: OSI model (in/out layers), inbound/outbound PDU details | ✅ | Ethernet, 802.1Q, ARP, IPv4, ICMP, NAT |
+| PDU information: OSI model (in/out layers), Next/Previous Layer, inbound/outbound PDU details | ✅ | Ethernet, 802.1Q, ARP, IPv4, ICMP, NAT; click the moving envelope to open it |
 | Scenario PDU list: fire again, delete, status | ✅ | |
 | Several scenarios, periodic PDUs, complex PDUs | ❌ | |
 | Challenge Me quizzes | ❌ | |

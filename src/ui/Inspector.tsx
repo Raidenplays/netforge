@@ -3,6 +3,7 @@ import { useStore } from '../store';
 import { DeviceGlyph, I } from './Icons';
 import { Terminal } from './Terminal';
 import { Desktop } from './Desktop';
+import { RouterGui } from './RouterGui';
 import type { Device, Iface, Project } from '../model/types';
 import { buildTopo, ifaceStatus, renew } from '../engine/network';
 import { runningConfig } from '../engine/ios';
@@ -105,7 +106,7 @@ export function Inspector() {
       <div className="tabs">
         {(['overview', 'config', 'cli'] as const).filter((k) => k !== 'cli' || dev.ios || dev.home || isHost(dev)).map((k) => (
           <button key={k} className={tab === k ? 'on' : ''} onClick={() => set({ inspectorTab: k })}>
-            {k === 'overview' ? 'Overview' : k === 'config' ? 'Config' : dev.ios ? 'CLI' : dev.home ? 'Status' : 'Desktop'}
+            {k === 'overview' ? 'Overview' : k === 'config' ? 'Config' : dev.ios ? 'CLI' : dev.home ? 'GUI' : 'Desktop'}
           </button>
         ))}
       </div>
@@ -120,7 +121,8 @@ export function Inspector() {
       ) : (
         <div className="insp-body">
           {tab === 'overview' && <Overview dev={dev} />}
-          {(tab === 'config' || (tab === 'cli' && dev.home)) && (dev.home ? <HomeConfig dev={dev} edit={edit} /> : dev.ios ? <IosConfig dev={dev} edit={edit} /> : dev.kind === 'ap' ? <ApConfig dev={dev} edit={edit} /> : dev.kind === 'cloud' || dev.kind === 'other' ? <div className="blank">This device is shown and can be cabled, but NetForge doesn't simulate it yet.</div> : <HostConfig dev={dev} edit={edit} />)}
+          {tab === 'cli' && dev.home && <GuiLauncher dev={dev} edit={edit} />}
+          {tab === 'config' && (dev.home ? <HomeConfig dev={dev} edit={edit} /> : dev.ios ? <IosConfig dev={dev} edit={edit} /> : dev.kind === 'ap' ? <ApConfig dev={dev} edit={edit} /> : dev.kind === 'cloud' || dev.kind === 'other' ? <div className="blank">This device is shown and can be cabled, but NetForge doesn't simulate it yet.</div> : <HostConfig dev={dev} edit={edit} />)}
         </div>
       )}
     </aside>
@@ -354,6 +356,52 @@ function ApConfig({ dev, edit }: { dev: Device; edit: (fn: (d: Device, p: Projec
       </div>
       <p style={{ color: 'var(--text-3)' }}>The access point bridges Wi-Fi clients with a matching SSID onto Port 0.</p>
     </div>
+  );
+}
+
+/** The router's web page, opened in a window like Packet Tracer's GUI tab. */
+function GuiLauncher({ dev, edit }: { dev: Device; edit: (fn: (d: Device, p: Project) => void) => void }) {
+  const [open, setOpen] = useState(true);
+  const h = dev.home!;
+  return (
+    <>
+      <div className="section">
+        <h4>Router web page</h4>
+        <p className="dim" style={{ marginTop: 0 }}>
+          Setup, Wireless and Status pages, like the router's built-in configuration site. Changes apply when you press Save Settings.
+        </p>
+        <button className="btn primary" onClick={() => setOpen(true)}>
+          Open configuration page
+        </button>
+      </div>
+      <div className="section">
+        <h4>At a glance</h4>
+        <dl className="kv">
+          <dt>Internet</dt>
+          <dd>
+            {h.wanIp} ({h.wanMode === 'static' ? 'static' : 'DHCP'})
+          </dd>
+          <dt>LAN</dt>
+          <dd>
+            {h.lanIp} / {h.lanMask}
+          </dd>
+          <dt>Wireless</dt>
+          <dd>{(h.radios ?? [{ ssid: h.ssid, enabled: true }]).map((r, k) => (r.enabled ? (k === 0 ? h.ssid : r.ssid) : '—')).join(' · ')}</dd>
+        </dl>
+      </div>
+      {open && (
+        <RouterGui
+          key={dev.id}
+          dev={dev}
+          onClose={() => setOpen(false)}
+          onSave={(next) =>
+            edit((d) => {
+              d.home = next;
+            })
+          }
+        />
+      )}
+    </>
   );
 }
 

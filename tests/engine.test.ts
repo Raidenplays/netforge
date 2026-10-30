@@ -112,6 +112,10 @@ withLab('Lab 7 walkthrough: DNS ping, and NAT seen in the packet inspector', () 
   produce(p, (d) => {
     const pc = d.devices.find((x) => x.name === 'Gaming PC')!;
     expect(hostExec(d, pc, 'ping www.cisco.com')).toContain('Reply from 209.209.100.100');
+    // an address nobody routes: the ISP answers, not the PC itself
+    const out = hostExec(d, pc, 'ping 1.1.1.1');
+    expect(out).toContain('Reply from 209.122.122.2: Destination host unreachable.');
+    expect(out).not.toContain('Reply from 192.168.0.11');
   });
   const r = ping(p, by('Gaming PC').id, '209.209.100.100');
   // at the wireless router: private source in, public source out (Lab 7, part 3 questions 7-9)

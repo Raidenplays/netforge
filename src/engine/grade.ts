@@ -102,7 +102,12 @@ function actual(p: Project, d: Device, rest: string[], raw = false): string | un
     return undefined;
   }
   // radio settings: ["Wireless", "SSID"], ["Wireless 2.4G", "SSID"], ["Port 1", "SSID"]
-  if (b === 'SSID' && rest.length === 2) return h?.ssid ?? d.ssid;
+  if (b === 'SSID' && rest.length === 2) {
+    // "Wireless 2.4G", "Wireless 5G-1", "Wireless 5G-2" on home routers
+    const k = /5G-?1/i.test(a) ? 1 : /5G-?2/i.test(a) ? 2 : 0;
+    if (h) return k === 0 ? h.ssid : h.radios?.[k]?.ssid;
+    return d.ssid;
+  }
   if (a === 'DHCP Server' && h) {
     if (b === 'DHCP Enable') return h.dhcpEnabled ? '1' : '0';
     if (b === 'Pools' && c?.startsWith('Pool ') && e) {
