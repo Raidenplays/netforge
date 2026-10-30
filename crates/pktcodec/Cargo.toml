@@ -1,0 +1,9 @@
+[package]
+name = "pktcodec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cipher = "0.4"
+flate2 = "1.1.10"
+twofish = "0.7"

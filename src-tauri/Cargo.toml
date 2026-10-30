@@ -1,0 +1,22 @@
+[package]
+name = "netforge"
+version = "0.1.0"
+description = "A modern network simulator that opens Cisco Packet Tracer files"
+authors = ["Raiden Brundin"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "netforge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pktcodec = { path = "../crates/pktcodec" }
