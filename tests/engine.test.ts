@@ -102,6 +102,28 @@ withLab('a finished Assignment 7 works exactly as saved', () => {
     expect(ping(p, by(d.name).id, '209.209.100.100').ok, d.name).toBe(true);
 });
 
+withLab('Lab 7 walkthrough: DNS ping, and NAT seen in the packet inspector', () => {
+  const { project } = importPkt(xml, 'a7.pkt');
+  if (project.links.length < 4) return; // needs the finished lab
+  const p = produce(project, (d) => void settleDhcp(d));
+  const by = (n: string) => p.devices.find((d) => d.name === n)!;
+  // the home router's Internet connection is Static IP (saved by PT as type 2)
+  expect(by('Wireless Router0').home!.wanMode).toBe('static');
+  produce(p, (d) => {
+    const pc = d.devices.find((x) => x.name === 'Gaming PC')!;
+    expect(hostExec(d, pc, 'ping www.cisco.com')).toContain('Reply from 209.209.100.100');
+  });
+  const r = ping(p, by('Gaming PC').id, '209.209.100.100');
+  // at the wireless router: private source in, public source out (Lab 7, part 3 questions 7-9)
+  const atRouter = r.events.find((e) => e.to === 'Wireless Router0' && e.kind === 'ICMP')!;
+  expect(atRouter.in!.layers[2]).toContain('Src. IP: 192.168.0.11');
+  expect(atRouter.out!.layers[2]).toContain('Src. IP: 209.122.122.1');
+  expect(atRouter.out!.steps.join(' ')).toContain('NAT translates');
+  // the reply leaves the web server addressed to the inside global address (question 10)
+  const reply = r.events.find((e) => e.at === '--' && e.to === 'WEB Server')!;
+  expect(reply.out!.layers[2]).toContain('Dest. IP: 209.122.122.1');
+});
+
 withLab('IOS CLI: DHCP pool on a router', () => {
   let { project } = importPkt(xml, 'a7.pkt');
   const s = newSession();

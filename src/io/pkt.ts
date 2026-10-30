@@ -338,7 +338,8 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
         dhcpEnabled: txt(dhcp, 'ENABLED') === '1' || txt(dhcp, 'ENABLED') === 'true',
         startHost: Number(txt(engine, 'START_IP')) || 100,
         maxUsers: Number(txt(engine, 'MAX_USERS')) || 50,
-        wanMode: txt(engine, 'INTERNET_CONNECTION_TYPE') === '1' ? 'static' : 'dhcp',
+        // Packet Tracer: 0 = automatic (DHCP), 2 = static IP (1, 3, 4 are PPPoE and bridge modes)
+        wanMode: txt(engine, 'INTERNET_CONNECTION_TYPE') === '2' ? 'static' : 'dhcp',
         wanIp: txt(engine, 'INTERNET_IP_ADDRESS') || '0.0.0.0',
         wanMask: txt(engine, 'INTERNET_SUBNET_MASK') || '0.0.0.0',
         wanGateway: txt(engine, 'DEFAULT_GATEWAY') || '0.0.0.0',
@@ -532,7 +533,9 @@ export function exportPkt(p: Project): ExportReport {
       setTxt(engine, 'LAN_SUBNET_MASK', h.lanMask);
       setTxt(engine, 'START_IP', String(h.startHost));
       setTxt(engine, 'MAX_USERS', String(h.maxUsers));
-      setTxt(engine, 'INTERNET_CONNECTION_TYPE', h.wanMode === 'static' ? '1' : '0');
+      // only rewrite the connection type when NetForge's setting differs, so PPPoE/bridge modes survive
+      const savedStatic = txt(engine, 'INTERNET_CONNECTION_TYPE') === '2';
+      if (savedStatic !== (h.wanMode === 'static')) setTxt(engine, 'INTERNET_CONNECTION_TYPE', h.wanMode === 'static' ? '2' : '0');
       if (h.wanMode === 'static') {
         setTxt(engine, 'INTERNET_IP_ADDRESS', h.wanIp);
         setTxt(engine, 'INTERNET_SUBNET_MASK', h.wanMask);
