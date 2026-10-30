@@ -23,7 +23,6 @@ const NONCE: [u8; 16] = [16; 16];
 pub enum PktError {
     Decrypt,
     Decompress(String),
-    Utf8,
 }
 
 impl std::fmt::Display for PktError {
@@ -31,7 +30,6 @@ impl std::fmt::Display for PktError {
         match self {
             PktError::Decrypt => write!(f, "not a Packet Tracer file, or an unsupported version"),
             PktError::Decompress(e) => write!(f, "corrupt payload: {e}"),
-            PktError::Utf8 => write!(f, "payload is not valid UTF-8 XML"),
         }
     }
 }
@@ -175,9 +173,61 @@ pub fn decode(input: &[u8]) -> Result<Vec<u8>, PktError> {
     }
 }
 
-/// Decode straight to a UTF-8 string.
+/// Bytes that can't appear in XML text (invalid UTF-8, C0 controls other than
+/// tab/LF/CR) are mapped to U+F700 + byte so the result is always valid XML,
+/// and `text_to_bytes` maps them back. Packet Tracer stores some binary blobs
+/// (e.g. activity state) raw inside attributes.
+const RAW_BASE: u32 = 0xF700;
+
+pub fn bytes_to_text(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let raw = |out: &mut String, b: u8| out.push(char::from_u32(RAW_BASE + b as u32).unwrap());
+    for chunk in bytes.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            let u = c as u32;
+            if (u < 0x20 && c != '\t' && c != '\n' && c != '\r') || (RAW_BASE..RAW_BASE + 256).contains(&u) {
+                if u < 0x80 {
+                    raw(&mut out, u as u8)
+                } else {
+                    // a literal private-use char: escape its UTF-8 bytes
+                    let mut buf = [0u8; 4];
+                    for b in c.encode_utf8(&mut buf).bytes() {
+                        raw(&mut out, b)
+                    }
+                }
+            } else {
+                out.push(c)
+            }
+        }
+        for &b in chunk.invalid() {
+            raw(&mut out, b)
+        }
+    }
+    out
+}
+
+pub fn text_to_bytes(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut buf = [0u8; 4];
+    for c in text.chars() {
+        let u = c as u32;
+        if (RAW_BASE..RAW_BASE + 256).contains(&u) {
+            out.push((u - RAW_BASE) as u8)
+        } else {
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes())
+        }
+    }
+    out
+}
+
+/// Decode to XML text (lossless, see `bytes_to_text`).
 pub fn decode_to_string(input: &[u8]) -> Result<String, PktError> {
-    String::from_utf8(decode(input)?).map_err(|_| PktError::Utf8)
+    Ok(bytes_to_text(&decode(input)?))
+}
+
+/// Encode XML text produced by `decode_to_string` back into a file.
+pub fn encode_str(xml: &str) -> Vec<u8> {
+    encode(&text_to_bytes(xml))
 }
 
 /// Encode XML into a `.pkt` file that Packet Tracer 5.0+ can open.
@@ -199,6 +249,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn raw_bytes_survive() {
+        let data = b"<A V=\"\xff\x01ok\xef\x9c\x80\" />".to_vec();
+        let t = bytes_to_text(&data);
+        assert!(!t.chars().any(|c| (c as u32) < 0x20));
+        assert_eq!(text_to_bytes(&t), data);
+    }
+
+    #[test]
     fn round_trip() {
         let xml = b"<PACKETTRACER5><VERSION>8.2.2</VERSION></PACKETTRACER5>";
         let enc = encode(xml);
@@ -209,10 +267,12 @@ mod tests {
     fn sample_file() {
         let path = std::env::var("PKT_SAMPLE").unwrap_or_else(|_| "../../samples/a7.pkt".into());
         if let Ok(bytes) = std::fs::read(&path) {
-            let xml = decode_to_string(&bytes).expect("decode sample");
+            let raw = decode(&bytes).expect("decode sample");
+            let xml = decode_to_string(&bytes).unwrap();
             assert!(xml.contains("PACKETTRACER"));
-            // re-encoding must give back the same XML
-            assert_eq!(decode(&encode(xml.as_bytes())).unwrap(), xml.as_bytes());
+            // text mapping and re-encoding are lossless
+            assert_eq!(text_to_bytes(&xml), raw);
+            assert_eq!(decode(&encode_str(&xml)).unwrap(), raw);
         }
     }
 }

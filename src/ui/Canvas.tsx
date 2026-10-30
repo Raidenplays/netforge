@@ -400,7 +400,7 @@ export function Canvas() {
               className={`node k-${d.kind} ${selected === d.id ? 'sel' : ''} ${d.powered ? '' : 'off'} ${cableFrom?.dev === d.id || pduFrom === d.id ? 'cable-src' : ''}`}
               transform={`translate(${d.x},${d.y})`}
               onPointerDown={(e) => onNodeDown(e, d)}
-              onDoubleClick={() => set({ selected: d.id, inspectorTab: d.ios || d.kind !== 'homerouter' ? 'cli' : 'config' })}
+              onDoubleClick={() => set({ selected: d.id, inspectorTab: d.ios || ['pc', 'laptop', 'server', 'printer', 'tablet', 'phone'].includes(d.kind) ? 'cli' : 'config' })}
               onContextMenu={(e) => contextMenu(e, { dev: d.id })}
             >
               <rect className="tile" x={-TILE / 2} y={-TILE / 2} width={TILE} height={TILE} rx={15} />
@@ -542,6 +542,7 @@ const portKind = (name: string, speed: number) =>
 
 const short = (n: string) =>
   n
+    .replace('GigabitEthernet ', 'Gi')
     .replace('GigabitEthernet', 'Gi')
     .replace('FastEthernet', 'Fa')
     .replace('Ethernet ', 'Eth')

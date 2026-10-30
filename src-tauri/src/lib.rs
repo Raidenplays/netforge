@@ -35,7 +35,7 @@ fn open_file(path: String) -> Result<Opened, String> {
 /// Write either Packet Tracer XML (encoded to .pkt) or plain text.
 #[tauri::command]
 fn save_file(path: String, kind: String, content: String) -> Result<(), String> {
-    let data = if kind == "pkt" { pktcodec::encode(content.as_bytes()) } else { content.into_bytes() };
+    let data = if kind == "pkt" { pktcodec::encode_str(&content) } else { content.into_bytes() };
     // write atomically so a crash never leaves a half-written lab
     let tmp = format!("{path}.netforge-tmp");
     std::fs::write(&tmp, data).map_err(|e| e.to_string())?;

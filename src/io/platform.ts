@@ -81,12 +81,13 @@ export async function saveProject(p: Project, as: 'auto' | 'pkt' | 'netforge', f
   }
   const { invoke, dialog } = await tauri();
   let path = p.filePath;
-  const ext = wantPkt ? 'pkt' : 'netforge';
-  if (forceDialog || !path || !path.toLowerCase().endsWith(`.${ext}`) && !(wantPkt && path.toLowerCase().endsWith('.pka'))) {
+  const ptExt = p.activity || /\.pka$/i.test(p.fileName ?? '') ? 'pka' : 'pkt';
+  const ext = wantPkt ? ptExt : 'netforge';
+  if (forceDialog || !path || !path.toLowerCase().endsWith(`.${ext}`)) {
     const stem = (p.fileName ?? 'Untitled').replace(/\.(pkt|pka|netforge)$/i, '');
     const chosen = await dialog.save({
       defaultPath: `${stem}.${ext}`,
-      filters: [wantPkt ? { name: 'Packet Tracer', extensions: ['pkt'] } : { name: 'NetForge project', extensions: ['netforge'] }],
+      filters: [wantPkt ? { name: ptExt === 'pka' ? 'Packet Tracer activity' : 'Packet Tracer', extensions: [ptExt] } : { name: 'NetForge project', extensions: ['netforge'] }],
     });
     if (!chosen) return null;
     path = chosen;

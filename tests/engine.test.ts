@@ -65,8 +65,8 @@ withLab('full lab: DHCP + NAT + ping to web server', () => {
     pc.dhcpClient = true; lap.dhcpClient = true; tab.dhcpClient = true;
     p.links.push({ id: uid(), a: { dev: isp.id, iface: 'GigabitEthernet0/0' }, b: { dev: hr.id, iface: 'Internet' }, cable: 'straight' });
     p.links.push({ id: uid(), a: { dev: isp.id, iface: 'GigabitEthernet0/1' }, b: { dev: web.id, iface: 'FastEthernet0' }, cable: 'straight' });
-    p.links.push({ id: uid(), a: { dev: pc.id, iface: 'FastEthernet0' }, b: { dev: hr.id, iface: 'Ethernet 1' }, cable: 'straight' });
-    p.links.push({ id: uid(), a: { dev: lap.id, iface: 'FastEthernet0' }, b: { dev: hr.id, iface: 'Ethernet 2' }, cable: 'straight' });
+    p.links.push({ id: uid(), a: { dev: pc.id, iface: 'FastEthernet0' }, b: { dev: hr.id, iface: 'GigabitEthernet 1' }, cable: 'straight' });
+    p.links.push({ id: uid(), a: { dev: lap.id, iface: 'FastEthernet0' }, b: { dev: hr.id, iface: 'GigabitEthernet 2' }, cable: 'straight' });
     console.log('dhcp', settleDhcp(p));
   });
   const pc = by('Gaming PC');

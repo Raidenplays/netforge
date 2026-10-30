@@ -32,29 +32,30 @@ export interface Topo {
 const node = (dev: string, iface: string) => `${dev}::${iface}`;
 
 const WIFI_RANGE = 520;
-const HOME_LAN = ['Ethernet 1', 'Ethernet 2', 'Ethernet 3', 'Ethernet 4', 'Wireless'];
 
 export const ifaceOf = (d: Device | undefined, name: string) => d?.ifaces.find((i) => i.name === name);
 
 /** Wi-Fi clients associate with the nearest home router in range. */
 export function wirelessLinks(p: Project): Link[] {
-  const aps = p.devices.filter((d) => d.kind === 'homerouter' && d.powered);
+  const aps = p.devices.filter((d) => (d.kind === 'homerouter' || d.kind === 'ap') && d.powered);
+  const apSsid = (ap: Device) => (ap.kind === 'ap' ? (ap.ssid ?? 'Default') : ap.home?.ssid);
+  const apRadio = (ap: Device) => (ap.kind === 'ap' ? (ap.ifaces.find((i) => i.media === 'wireless')?.name ?? 'Port 1') : 'Wireless');
   const out: Link[] = [];
   for (const d of p.devices) {
-    if (!d.powered || d.kind === 'homerouter') continue;
+    if (!d.powered || d.kind === 'homerouter' || d.kind === 'ap') continue;
     const w = d.ifaces.find((i) => i.media === 'wireless' && !i.shutdown);
     if (!w) continue;
     let best: Device | undefined;
     let bd = Infinity;
     for (const ap of aps) {
-      if ((d.ssid ?? 'Default') !== ap.home?.ssid) continue;
+      if ((d.ssid ?? 'Default') !== apSsid(ap)) continue;
       const dist = Math.hypot(ap.x - d.x, ap.y - d.y);
       if (dist < bd && dist <= WIFI_RANGE) {
         bd = dist;
         best = ap;
       }
     }
-    if (best) out.push({ id: `wifi_${d.id}`, a: { dev: d.id, iface: w.name }, b: { dev: best.id, iface: 'Wireless' }, cable: 'auto' });
+    if (best) out.push({ id: `wifi_${d.id}`, a: { dev: d.id, iface: w.name }, b: { dev: best.id, iface: apRadio(best) }, cable: 'auto' });
   }
   return out;
 }
@@ -92,12 +93,19 @@ export function buildTopo(p: Project): Topo {
   // bridging devices
   for (const d of p.devices) {
     if (!d.powered) continue;
-    if (d.kind === 'switch') {
+    if (d.kind === 'switch' || d.kind === 'ap') {
       const ports = d.ifaces.filter((i) => !i.shutdown && (i.media !== 'virtual' || i.name.startsWith('Vlan')));
       for (let k = 1; k < ports.length; k++) union(node(d.id, ports[0].name), node(d.id, ports[k].name));
     }
+    if (d.kind === 'router') {
+      // EHWIC switch-module ports (e.g. FastEthernet0/1/0) carry no IP and belong to Vlan1
+      const svi = d.ifaces.find((i) => /^Vlan\d+$/.test(i.name) && !i.shutdown && i.ip);
+      if (svi)
+        for (const i of d.ifaces)
+          if (i.media === 'copper' && !i.ip && !i.shutdown && /^\D+\d+\/\d+\/\d+$/.test(i.name)) union(node(d.id, svi.name), node(d.id, i.name));
+    }
     if (d.kind === 'homerouter') {
-      for (const n of HOME_LAN) if (ifaceOf(d, n)) union(node(d.id, 'LAN'), node(d.id, n));
+      for (const i of d.ifaces) if (i.name !== 'Internet' && !i.shutdown) union(node(d.id, 'LAN'), node(d.id, i.name));
     }
   }
 
@@ -181,6 +189,8 @@ export function l2Path(t: Topo, from: string, to: string) {
 interface Fwd {
   egress: Endpoint;
   nextHop: string;
+  /** route points at an interface: on point-to-point links the far end is the next hop */
+  viaIface?: boolean;
 }
 
 function routeLookup(t: Topo, d: Device, dst: string): Fwd | { error: string } {
@@ -197,7 +207,7 @@ function routeLookup(t: Topo, d: Device, dst: string): Fwd | { error: string } {
   }
 
   // routers & home routers: longest prefix match over connected + static
-  type Cand = { prefix: number; egress: Endpoint; nextHop: string };
+  type Cand = { prefix: number; egress: Endpoint; nextHop: string; viaIface?: boolean };
   const cands: Cand[] = [];
   for (const e of own) if (inNet(dst, e.ip, e.mask)) cands.push({ prefix: maskToPrefix(e.mask), egress: e, nextHop: dst });
 
@@ -210,17 +220,19 @@ function routeLookup(t: Topo, d: Device, dst: string): Fwd | { error: string } {
     if (!inNet(dst, r.network, r.mask)) continue;
     let egress: Endpoint | undefined;
     let nh = dst;
+    let viaIface = false;
     if (r.via) {
       egress = own.find((e) => inNet(r.via!, e.ip, e.mask));
       nh = r.via;
     } else if (r.iface) {
       egress = own.find((e) => e.iface.toLowerCase() === r.iface!.toLowerCase());
+      viaIface = true;
     }
-    if (egress) cands.push({ prefix: maskToPrefix(r.mask), egress, nextHop: nh });
+    if (egress) cands.push({ prefix: maskToPrefix(r.mask), egress, nextHop: nh, viaIface });
   }
   if (!cands.length) return { error: 'no route to host' };
   cands.sort((a, b) => b.prefix - a.prefix);
-  return { egress: cands[0].egress, nextHop: cands[0].nextHop };
+  return { egress: cands[0].egress, nextHop: cands[0].nextHop, viaIface: cands[0].viaIface };
 }
 
 export interface SimEvent {
@@ -302,7 +314,11 @@ function forward(
     }
 
     const seg = segOf(t, f.egress.node);
-    const target = t.endpoints.find((e) => e.ip === f.nextHop && segOf(t, e.node) === seg && e.dev.id !== cur.id);
+    let target = t.endpoints.find((e) => e.ip === f.nextHop && segOf(t, e.node) === seg && e.dev.id !== cur.id);
+    if (!target && f.viaIface) {
+      const peers = t.endpoints.filter((e) => segOf(t, e.node) === seg && e.dev.id !== cur.id);
+      if (peers.length === 1) target = peers[0];
+    }
     const arpKey = `${seg}|${f.nextHop}`;
     if (!arp.has(arpKey)) {
       arp.add(arpKey);
@@ -409,26 +425,58 @@ export function dhcpDiscover(p: Project, clientId: string, ifaceName?: string): 
   const mac = ifaceOf(client, iname)?.mac ?? '';
   const used = usedIps(p, clientId);
 
+  const fromServer = (srv: Device, subnetIp: string): DhcpOffer | null => {
+    const svc = srv.dhcpService;
+    if (!svc?.enabled) return null;
+    const pool = svc.pools.find((pl) => isIp(pl.network) && inNet(subnetIp, pl.network, pl.mask));
+    if (!pool) return null;
+    const offer = (ip: string) => ({ ip, mask: pool.mask, gateway: pool.router, dns: pool.dns, server: srv });
+    const existing = svc.leases.find((l) => l.mac === mac && !used.has(l.ip) && inNet(l.ip, pool.network, pool.mask));
+    if (existing) return offer(existing.ip);
+    const start = ipToInt(pool.start) ?? network(pool.network, pool.mask) + 1;
+    for (let k = 0; k < pool.max; k++) {
+      const ip = intToIp(start + k);
+      if (!inNet(ip, pool.network, pool.mask)) break;
+      if (used.has(ip) || svc.leases.some((l) => l.ip === ip)) continue;
+      svc.leases.push({ ip, mac });
+      return offer(ip);
+    }
+    return null;
+  };
+
   for (const e of t.endpoints) {
     if (segOf(t, e.node) !== seg || e.dev.id === clientId) continue;
     const s = e.dev;
+    if (s.dhcpService) {
+      const o = fromServer(s, e.ip);
+      if (o) return o;
+    }
+    // DHCP relay: ip helper-address on the router interface facing the client
+    const helper = ifaceOf(s, e.iface)?.extra?.map((x) => x.match(/^ip helper-address (\S+)/)?.[1]).find(Boolean);
+    if (helper && s.ios) {
+      const target = t.endpoints.find((x) => x.ip === helper);
+      if (target && ping(p, s.id, helper).ok) {
+        const o = target.dev.dhcpService ? fromServer(target.dev, e.ip) : null;
+        if (o) return o;
+      }
+    }
     if (s.kind === 'homerouter' && s.home?.dhcpEnabled && e.iface === 'LAN') {
       const h = s.home;
       const base = network(h.lanIp, h.lanMask);
-      const existing = h.leases.find((l) => l.mac === mac);
-      if (existing) return { ip: existing.ip, mask: h.lanMask, gateway: h.lanIp, dns: h.lanIp, server: s };
+      const existing = h.leases.find((l) => l.mac === mac && !used.has(l.ip));
+      if (existing) return { ip: existing.ip, mask: h.lanMask, gateway: h.lanIp, dns: h.dns || h.lanIp, server: s };
       for (let k = 0; k < h.maxUsers; k++) {
         const ip = intToIp(base + h.startHost + k);
         if (!used.has(ip) && !h.leases.some((l) => l.ip === ip)) {
           h.leases.push({ ip, mac });
-          return { ip, mask: h.lanMask, gateway: h.lanIp, dns: h.lanIp, server: s };
+          return { ip, mask: h.lanMask, gateway: h.lanIp, dns: h.dns || h.lanIp, server: s };
         }
       }
     }
     if (s.ios) {
       const pool = s.ios.pools.find((pl) => pl.network && pl.mask && inNet(e.ip, pl.network, pl.mask));
       if (!pool || !pool.network || !pool.mask) continue;
-      const existing = s.ios.leases.find((l) => l.mac === mac && inNet(l.ip, pool.network!, pool.mask!));
+      const existing = s.ios.leases.find((l) => l.mac === mac && !used.has(l.ip) && inNet(l.ip, pool.network!, pool.mask!));
       const offer = (ip: string) => ({ ip, mask: pool.mask!, gateway: pool.router ?? '0.0.0.0', dns: pool.dns ?? '0.0.0.0', server: s });
       if (existing) return offer(existing.ip);
       const lo = network(pool.network, pool.mask) + 1;

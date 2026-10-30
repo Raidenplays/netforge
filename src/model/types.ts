@@ -8,6 +8,7 @@ export type DeviceKind =
   | 'phone'
   | 'printer'
   | 'homerouter'
+  | 'ap'
   | 'cloud'
   | 'other';
 
@@ -63,6 +64,23 @@ export interface IosState {
   extraPost: string[];
 }
 
+export interface ServerPool {
+  name: string;
+  network: string;
+  mask: string;
+  router: string;
+  start: string;
+  max: number;
+  dns: string;
+}
+
+/** DHCP service on a Server-PT */
+export interface ServerDhcp {
+  enabled: boolean;
+  pools: ServerPool[];
+  leases: DhcpLease[];
+}
+
 export interface HomeRouterState {
   lanIp: string;
   lanMask: string;
@@ -74,6 +92,8 @@ export interface HomeRouterState {
   wanMask: string;
   wanGateway: string;
   ssid: string;
+  /** DNS server handed out and used by the router */
+  dns?: string;
   leases: DhcpLease[];
 }
 
@@ -91,6 +111,8 @@ export interface Device {
   dhcpClient?: boolean;
   /** Wi-Fi clients: network they try to join */
   ssid?: string;
+  /** DHCP service (servers) */
+  dhcpService?: ServerDhcp;
   /** IOS devices (routers, switches) */
   ios?: IosState;
   /** Linksys-style home routers */
@@ -125,6 +147,22 @@ export interface Note {
   text: string;
 }
 
+export interface GradeItem {
+  /** path below the device, e.g. ['ISP', 'Ports', 'GigabitEthernet0/0', 'IP Address'] */
+  path: string[];
+  expected: string;
+  points: number;
+  /** compared against an activity variable we don't evaluate */
+  variable: boolean;
+}
+
+export interface Activity {
+  title?: string;
+  pages: string[];
+  items: GradeItem[];
+  completeFeedback?: string;
+}
+
 export interface Project {
   devices: Device[];
   links: Link[];
@@ -132,6 +170,8 @@ export interface Project {
   /** original decoded XML when opened from a .pkt file */
   sourceXml?: string;
   ptVersion?: string;
+  /** .pka activity data (instructions + assessment) */
+  activity?: Activity;
   fileName?: string;
   filePath?: string;
 }

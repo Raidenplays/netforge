@@ -85,6 +85,13 @@ export const DeviceGlyph = ({ kind, ...p }: P & { kind: DeviceKind }) => {
           <path d="M7 16.5h.01M10 16.5h.01M8.5 10a5 5 0 0 1 7 0M6.2 7.6a8.3 8.3 0 0 1 11.6 0M12 12.3v.7" />
         </S>
       );
+    case 'ap':
+      return (
+        <S {...p}>
+          <rect x="5" y="14" width="14" height="6" rx="2" />
+          <path d="M9 10.5a4.2 4.2 0 0 1 6 0M6.6 8a7.6 7.6 0 0 1 10.8 0M12 13v1" />
+        </S>
+      );
     case 'cloud':
       return (
         <S {...p}>

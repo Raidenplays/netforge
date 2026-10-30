@@ -75,6 +75,7 @@ export function Inspector() {
     });
 
   const t = templateFor(dev.model);
+  if (tab === 'cli' && !dev.ios && !dev.home && !isHost(dev)) queueMicrotask(() => set({ inspectorTab: 'config' }));
   return (
     <aside className="inspector">
       <div className="insp-head">
@@ -100,7 +101,7 @@ export function Inspector() {
         <button className={`toggle ${dev.powered ? 'on' : ''}`} title="Power" onClick={() => edit((d) => (d.powered = !d.powered))} />
       </div>
       <div className="tabs">
-        {(['overview', 'config', 'cli'] as const).map((k) => (
+        {(['overview', 'config', 'cli'] as const).filter((k) => k !== 'cli' || dev.ios || dev.home || isHost(dev)).map((k) => (
           <button key={k} className={tab === k ? 'on' : ''} onClick={() => set({ inspectorTab: k })}>
             {k === 'overview' ? 'Overview' : k === 'config' ? 'Config' : dev.ios ? 'CLI' : dev.home ? 'Status' : 'Desktop'}
           </button>
@@ -113,7 +114,7 @@ export function Inspector() {
       ) : (
         <div className="insp-body">
           {tab === 'overview' && <Overview dev={dev} />}
-          {(tab === 'config' || (tab === 'cli' && dev.home)) && (dev.home ? <HomeConfig dev={dev} edit={edit} /> : dev.ios ? <IosConfig dev={dev} edit={edit} /> : <HostConfig dev={dev} edit={edit} />)}
+          {(tab === 'config' || (tab === 'cli' && dev.home)) && (dev.home ? <HomeConfig dev={dev} edit={edit} /> : dev.ios ? <IosConfig dev={dev} edit={edit} /> : dev.kind === 'ap' ? <ApConfig dev={dev} edit={edit} /> : dev.kind === 'cloud' || dev.kind === 'other' ? <div className="blank">This device is shown and can be cabled, but NetForge doesn't simulate it yet.</div> : <HostConfig dev={dev} edit={edit} />)}
         </div>
       )}
     </aside>
@@ -267,6 +268,31 @@ function HostConfig({ dev, edit }: { dev: Device; edit: (fn: (d: Device, p: Proj
           </button>
         )}
       </div>
+      {dev.dhcpService && (
+        <div className="section">
+          <h4>
+            DHCP service
+            <button className={`toggle ${dev.dhcpService.enabled ? 'on' : ''}`} onClick={() => edit((d) => (d.dhcpService!.enabled = !d.dhcpService!.enabled))} />
+          </h4>
+          {dev.dhcpService.pools.map((pl) => (
+            <dl className="kv" key={pl.name} style={{ marginBottom: 10 }}>
+              <dt>{pl.name}</dt>
+              <dd>
+                {pl.network}/{maskToPrefix(pl.mask)}
+              </dd>
+              <dt>Gateway</dt>
+              <dd>{pl.router}</dd>
+              <dt>Range</dt>
+              <dd>
+                {pl.start} · {pl.max} users
+              </dd>
+              <dt>DNS</dt>
+              <dd>{pl.dns}</dd>
+            </dl>
+          ))}
+          {dev.dhcpService.leases.length > 0 && <div className="code" style={{ maxHeight: 120 }}>{dev.dhcpService.leases.map((l) => `${l.ip.padEnd(16)} ${l.mac}`).join('\n')}</div>}
+        </div>
+      )}
       {dev.ssid !== undefined && (
         <div className="section">
           <h4>Wireless</h4>
@@ -277,6 +303,19 @@ function HostConfig({ dev, edit }: { dev: Device; edit: (fn: (d: Device, p: Proj
         </div>
       )}
     </>
+  );
+}
+
+function ApConfig({ dev, edit }: { dev: Device; edit: (fn: (d: Device, p: Project) => void) => void }) {
+  return (
+    <div className="section">
+      <h4>Wireless</h4>
+      <div className="field">
+        <label>SSID</label>
+        <Commit mono={false} value={dev.ssid ?? 'Default'} onCommit={(v) => edit((d) => (d.ssid = v))} />
+      </div>
+      <p style={{ color: 'var(--text-3)' }}>The access point bridges Wi-Fi clients with a matching SSID onto Port 0.</p>
+    </div>
   );
 }
 
@@ -336,6 +375,13 @@ function HomeConfig({ dev, edit }: { dev: Device; edit: (fn: (d: Device, p: Proj
             {h.leases.map((l) => `${l.ip.padEnd(16)} ${l.mac}`).join('\n')}
           </div>
         )}
+      </div>
+      <div className="section">
+        <h4>DNS</h4>
+        <div className="field">
+          <label>DNS server</label>
+          <Commit value={h.dns ?? ''} validate={ipOk} placeholder="handed out to DHCP clients" onCommit={(v) => hset((x) => (x.dns = v || undefined))} />
+        </div>
       </div>
       <div className="section">
         <h4>Wireless</h4>
@@ -568,6 +614,7 @@ const KIND_LABEL: Record<string, string> = {
   phone: 'Phones',
   printer: 'Printers',
   homerouter: 'Home routers',
+  ap: 'Access points',
   cloud: 'Clouds',
   other: 'Other',
 };

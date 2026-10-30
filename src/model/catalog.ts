@@ -115,6 +115,17 @@ export const TEMPLATES: Template[] = [
     ports: [['Wireless0', 'wireless', 300]],
   },
   {
+    model: 'AccessPoint-PT',
+    kind: 'ap',
+    label: 'Access point',
+    group: 'Wireless',
+    blurb: 'Bridges Wi-Fi onto a wired LAN',
+    ports: [
+      ['Port 0', 'copper', 100],
+      ['Port 1', 'wireless', 300],
+    ],
+  },
+  {
     model: 'HomeRouter-PT-AC',
     kind: 'homerouter',
     label: 'Home router',
@@ -122,10 +133,10 @@ export const TEMPLATES: Template[] = [
     blurb: 'Wi-Fi AC · 4 LAN · NAT · DHCP',
     ports: [
       ['Internet', 'copper', 1000],
-      ['Ethernet 1', 'copper', 1000],
-      ['Ethernet 2', 'copper', 1000],
-      ['Ethernet 3', 'copper', 1000],
-      ['Ethernet 4', 'copper', 1000],
+      ['GigabitEthernet 1', 'copper', 1000],
+      ['GigabitEthernet 2', 'copper', 1000],
+      ['GigabitEthernet 3', 'copper', 1000],
+      ['GigabitEthernet 4', 'copper', 1000],
       ['Wireless', 'wireless', 867],
     ],
   },
@@ -168,6 +179,7 @@ export function createDevice(t: Template, x: number, y: number, existingNames: s
   const d: Device = { id: uid('dev'), kind: t.kind, model: t.model, name, x, y, ifaces, powered: true };
   if (t.kind === 'router' || t.kind === 'switch') d.ios = emptyIos(name);
   if (t.kind === 'switch') ifaces.push({ name: 'Vlan1', media: 'virtual', speed: 0, mac: randomMac(), shutdown: true });
+  if (t.kind === 'ap') d.ssid = 'Default';
   if (t.kind === 'homerouter')
     d.home = {
       lanIp: '192.168.0.1',

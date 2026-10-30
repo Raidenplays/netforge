@@ -4,7 +4,7 @@
  */
 import { emptyIos } from '../model/catalog';
 import { randomMac } from '../model/ip';
-import type { CableType, Device, DeviceKind, Iface, Link, Media, Project } from '../model/types';
+import type { Activity, CableType, Device, DeviceKind, GradeItem, Iface, Link, Media, Project } from '../model/types';
 import { uid } from '../model/types';
 import { parseRunningConfig, runningConfig } from '../engine/ios';
 
@@ -23,6 +23,11 @@ const KIND: Record<string, DeviceKind> = {
   WirelessRouterNewGeneration: 'homerouter',
   HomeRouter: 'homerouter',
   Cloud: 'cloud',
+  AccessPoint: 'ap',
+  CellTower: 'cloud',
+  CentralOfficeServer: 'cloud',
+  DslModem: 'cloud',
+  CableModem: 'cloud',
 };
 
 const SKIP = new Set(['Power Distribution Device']);
@@ -40,6 +45,41 @@ const setTxt = (el: Element | null | undefined, path: string, value: string) => 
   for (const p of path.split('/')) cur = kid(cur, p);
   if (cur) cur.textContent = value;
 };
+
+/**
+ * A .pka (PACKETTRACER5_ACTIVITY) embeds three networks. The last one is the
+ * student's working network; the others are the answer and initial networks,
+ * which NetForge never shows or modifies.
+ */
+function workingNet(root: Element): Element {
+  if (root.tagName !== 'PACKETTRACER5_ACTIVITY') return root;
+  const nets = kids(root, 'PACKETTRACER5');
+  return nets[nets.length - 1] ?? root;
+}
+
+function readActivity(root: Element): Activity | undefined {
+  if (root.tagName !== 'PACKETTRACER5_ACTIVITY') return undefined;
+  const pages = kids(kid(kid(root, 'ACTIVITY'), 'INSTRUCTIONS'), 'PAGE').map((p) => p.textContent ?? '');
+  const items: GradeItem[] = [];
+  const walk = (n: Element, path: string[]) => {
+    for (const c of kids(n, 'NODE')) {
+      const name = kid(c, 'NAME');
+      const p = [...path, name?.textContent ?? ''];
+      if (name?.getAttribute('checkType') === '2')
+        items.push({
+          path: p.slice(1),
+          expected: name.getAttribute('nodeValue') ?? '',
+          points: Number(txt(c, 'POINTS')) || 1,
+          variable: !!name.getAttribute('variableName'),
+        });
+      walk(c, p);
+    }
+  };
+  const comp = kid(root, 'COMPARISONS');
+  if (comp) walk(comp, []);
+  const titleMatch = pages[0]?.match(/<title>([^<]*)<\/title>/i);
+  return { title: titleMatch?.[1]?.trim(), pages, items, completeFeedback: txt(root, 'OVERALL_COMPLETE_FEEDBACK') };
+}
 
 function mediaOf(type: string): [Media, number, string] {
   if (type.includes('Wireless')) return ['wireless', 300, 'Wireless'];
@@ -75,7 +115,7 @@ function nameIfaces(kind: DeviceKind, ports: RawPort[], cfg: string[]): (string 
     let eth = 0;
     let wifi = false;
     return ports.map((p) => {
-      if (p.type.startsWith('eCopper')) return eth++ === 0 ? 'Internet' : `Ethernet ${eth - 1}`;
+      if (p.type.startsWith('eCopper')) return eth++ === 0 ? 'Internet' : `${p.type.includes('Gigabit') ? 'GigabitEthernet' : 'Ethernet'} ${eth - 1}`;
       if (p.type.startsWith('eAccessPoint') && !wifi) {
         wifi = true;
         return 'Wireless';
@@ -83,6 +123,7 @@ function nameIfaces(kind: DeviceKind, ports: RawPort[], cfg: string[]): (string 
       return null;
     });
   }
+  if (kind === 'ap') return ports.map((p, k) => (p.type ? `Port ${k}` : null));
   if (kind === 'router' || kind === 'switch') {
     const cfgNames = cfg.map((l) => l.match(/^interface (\S+)/)?.[1]).filter((n): n is string => !!n && !/^(Vlan|Loopback)/.test(n));
     const phys = ports.filter((p) => p.type && !p.type.includes('Wireless'));
@@ -139,7 +180,9 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
   const err = doc.querySelector('parsererror');
   if (err) throw new Error('The file decoded, but its XML is malformed.');
   const root = doc.documentElement;
-  const net = kid(root, 'NETWORK');
+  const work = workingNet(root);
+  const net = kid(work, 'NETWORK');
+  if (!net) throw new Error('No network found in this file.');
   const devEls = kids(kid(net, 'DEVICES'), 'DEVICE');
   const devices: Device[] = [];
   const skipped: string[] = [];
@@ -169,7 +212,7 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
       const mask = txt(p.el, 'SUBNET');
       ifaces.push({
         name: n,
-        media: kind === 'homerouter' && n === 'Wireless' ? 'wireless' : media,
+        media: (kind === 'homerouter' && n === 'Wireless') || (kind === 'ap' && p.type.includes('Wireless')) ? 'wireless' : media,
         speed: Number(txt(p.el, 'BANDWIDTH')) / 1000 || speed,
         mac: txt(p.el, 'MACADDRESS') || randomMac(),
         ip: ip || undefined,
@@ -213,16 +256,37 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
         wanMask: txt(engine, 'INTERNET_SUBNET_MASK') || '0.0.0.0',
         wanGateway: txt(engine, 'DEFAULT_GATEWAY') || '0.0.0.0',
         ssid,
+        dns: txt(engine, 'DNS_CLIENT/SERVER_IP') || txt(pool, 'DNS_SERVER') || undefined,
         leases: kids(kid(pool, 'DHCP_POOL_LEASES'), 'DHCP_POOL_LEASE').map((l) => ({ ip: txt(l, 'IP_ADDRESS'), mac: txt(l, 'MAC_ADDRESS') })),
       };
+    } else if (kind === 'ap') {
+      d.ssid = engine!.getElementsByTagName('SSID')[0]?.textContent ?? 'Default';
+    } else if (kind === 'cloud' || kind === 'other') {
+      // shown and cable-able, not simulated
     } else {
       d.gateway = txt(engine, 'GATEWAY');
       d.dns = txt(engine, 'DNS_CLIENT/SERVER_IP');
       const first = ports.find((p) => p.type);
       d.dhcpClient = first ? txt(first.el, 'PORT_DHCP_ENABLE') === 'true' : false;
+      const svc = kid(kid(kid(kid(engine, 'DHCP_SERVERS'), 'ASSOCIATED_PORTS'), 'ASSOCIATED_PORT'), 'DHCP_SERVER') ?? (kind === 'server' ? kid(engine, 'DHCP_SERVER') : null);
+      if (svc && kind === 'server') {
+        d.dhcpService = {
+          enabled: txt(svc, 'ENABLED') === '1' || txt(svc, 'ENABLED') === 'true',
+          pools: kids(kid(svc, 'POOLS'), 'POOL').map((pl) => ({
+            name: txt(pl, 'NAME'),
+            network: txt(pl, 'NETWORK'),
+            mask: txt(pl, 'MASK'),
+            router: txt(pl, 'DEFAULT_ROUTER'),
+            start: txt(pl, 'START_IP'),
+            max: Number(txt(pl, 'MAX_USERS')) || 50,
+            dns: txt(pl, 'DNS_SERVER'),
+          })),
+          leases: [],
+        };
+      }
       if (ifaces.some((i) => i.media === 'wireless')) d.ssid = txt(engine, 'WIRELESS_CLIENT/WIRELESS_COMMON/SSID') || 'Default';
     }
-    if (kind === 'other') warnings.push(`${name} (${type}) is shown but not simulated.`);
+    if (kind === 'other' || kind === 'cloud') warnings.push(`${name} (${type}) is shown but not simulated.`);
     devices.push(d);
     byIndex.set(idx, d);
     if (d.ptRef) byRef.set(d.ptRef, d);
@@ -241,7 +305,14 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
       warnings.push(`Skipped a cable between unknown devices (${from} ↔ ${to}).`);
       return;
     }
-    const fix = (d: Device, n: string) => d.ifaces.find((i) => i.name === n)?.name ?? d.ifaces.find((i) => i.name.replace(/\s/g, '') === n.replace(/\s/g, ''))?.name ?? n;
+    const fix = (d: Device, n: string) => {
+      const hit = d.ifaces.find((i) => i.name === n) ?? d.ifaces.find((i) => i.name.replace(/\s/g, '') === n.replace(/\s/g, ''));
+      if (hit) return hit.name;
+      // port naming we don't derive yet: trust the name on the cable
+      const [media, speed] = mediaOf(n.replace(/\d.*$/, ''));
+      d.ifaces.push({ name: n, media: /serial/i.test(n) ? 'serial' : media === 'wireless' ? 'copper' : media, speed, mac: randomMac(), shutdown: false });
+      return n;
+    };
     links.push({
       id: uid('lnk'),
       a: { dev: a.id, iface: fix(a, ports[0]) },
@@ -252,7 +323,7 @@ export function importPkt(xml: string, fileName?: string, filePath?: string): Im
   });
 
   return {
-    project: { devices, links, notes: [], sourceXml: xml, ptVersion: txt(root, 'VERSION'), fileName, filePath },
+    project: { devices, links, notes: [], sourceXml: xml, ptVersion: txt(work, 'VERSION') || txt(root, 'VERSION'), fileName, filePath, activity: readActivity(root) },
     skipped,
     warnings,
   };
@@ -281,7 +352,8 @@ export function exportPkt(p: Project): ExportReport {
   if (!p.sourceXml) throw new Error('Only projects opened from a .pkt file can be saved back as .pkt.');
   const doc = new DOMParser().parseFromString(p.sourceXml, 'application/xml');
   const root = doc.documentElement;
-  const net = kid(root, 'NETWORK');
+  const work = workingNet(root);
+  const net = kid(work, 'NETWORK');
   const devList = kid(net, 'DEVICES')!;
   const devEls = kids(devList, 'DEVICE');
   const notExported: string[] = [];
@@ -331,10 +403,23 @@ export function exportPkt(p: Project): ExportReport {
         setTxt(engine, 'DEFAULT_GATEWAY', h.wanGateway);
       }
       setTxt(kid(engine, 'DHCP_SERVER'), 'ENABLED', h.dhcpEnabled ? '1' : '0');
+      if (h.dns) {
+        setTxt(engine, 'DNS_CLIENT/SERVER_IP', h.dns);
+        setTxt(kid(kid(kid(engine, 'DHCP_SERVER'), 'POOLS'), 'POOL'), 'DNS_SERVER', h.dns);
+      }
       const ssid = engine.getElementsByTagName('SSID')[0];
       if (ssid) ssid.textContent = h.ssid;
+    } else if (d.kind === 'ap') {
+      const ssid = engine.getElementsByTagName('SSID')[0];
+      if (ssid && d.ssid !== undefined) ssid.textContent = d.ssid;
+    } else if (d.kind === 'cloud' || d.kind === 'other') {
+      // untouched
     } else {
       setTxt(engine, 'GATEWAY', d.gateway ?? '');
+      if (d.dhcpService) {
+        const svc = kid(kid(kid(kid(engine, 'DHCP_SERVERS'), 'ASSOCIATED_PORTS'), 'ASSOCIATED_PORT'), 'DHCP_SERVER') ?? kid(engine, 'DHCP_SERVER');
+        setTxt(svc, 'ENABLED', d.dhcpService.enabled ? '1' : '0');
+      }
       setTxt(engine, 'DNS_CLIENT/SERVER_IP', d.dns ?? '');
       if (d.ssid !== undefined) setTxt(engine, 'WIRELESS_CLIENT/WIRELESS_COMMON/SSID', d.ssid);
     }
@@ -399,7 +484,7 @@ export function exportPkt(p: Project): ExportReport {
 
   // drop scenario PDUs that point at deleted devices
   if (removedRefs.size) {
-    for (const pdu of Array.from(root.getElementsByTagName('PDU'))) {
+    for (const pdu of Array.from(work.getElementsByTagName('PDU'))) {
       const s = txt(pdu, 'SOURCE');
       const dst = kid(pdu, 'DESTINATION')?.getAttribute('device') ?? '';
       if (removedRefs.has(s) || removedRefs.has(dst)) pdu.parentElement?.removeChild(pdu);

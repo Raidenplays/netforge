@@ -22,18 +22,28 @@ simulation mode) and wraps them in an interface that feels like a current app:
 
 | Area | Supported |
 | --- | --- |
-| Devices | Routers (1941, 2911, 4331), switches (2960, 3650), PCs, laptops, servers, printers, tablets, phones, Linksys-style home Wi-Fi routers |
+| Devices | Routers (1941, 2911, 4331, incl. EHWIC switch ports), switches (2960, 3650, Switch-PT), PCs, laptops, servers, printers, tablets, phones, access points, Linksys-style home Wi-Fi routers. Cell towers and central office servers are shown but not simulated |
 | Layer 2 | Cables, switching / bridging, Wi-Fi association by SSID and range |
 | Layer 3 | Static IPs, default gateways, connected and static routes (longest-prefix match), switch SVIs |
-| Services | DHCP (IOS pools, excluded addresses, home-router DHCP), NAT overload (IOS `ip nat inside/outside`, home routers) |
+| Services | DHCP (IOS pools, excluded addresses, home-router DHCP, Server-PT DHCP service, `ip helper-address` relay), NAT overload (IOS `ip nat inside/outside`, home routers) |
 | IOS CLI | `enable`, `configure terminal`, `interface` (incl. `range`), `ip address`, `shutdown`, `hostname`, `ip route`, `ip dhcp pool`, `ip nat`, `show running-config`, `show ip interface brief`, `show ip route`, `show interfaces`, `show ip dhcp binding`, `show vlan brief`, `ping`, `traceroute`, `do`, `copy run start`… with abbreviations (`conf t`, `int g0/0`, `sh ip int br`), Tab completion, `?` and history |
 | Host prompt | `ipconfig [/all /renew /release]`, `ping [-n]`, `tracert` |
 
-Not yet: VLAN trunking, dynamic routing protocols (RIP/OSPF/EIGRP commands are accepted and saved but not run), ACL enforcement, IPv6, servers' HTTP/DNS/email services, and activity (`.pka`) grading.
+Not yet: VLAN trunking, dynamic routing protocols (RIP/OSPF/EIGRP commands are accepted and saved but not run), ACL enforcement, IPv6, and servers' HTTP/DNS/email services.
+
+## Activities (.pka)
+
+Opening a `.pka` loads your working network (never the answer network inside the file) and shows
+the activity's **instructions**. **Check results** scores the assessment items NetForge can
+evaluate (IP settings, gateways, DNS, cabling, SSIDs, home-router DHCP, device models) and lists each
+item as correct, incorrect or not checked, without revealing expected values. Items Packet Tracer grades
+through activity variables, DHCP-assigned addresses and cable-type codes are listed as not checked.
+It's an estimate: Packet Tracer's own Check Results is what counts for coursework. Saving back to
+`.pka` only changes your working network.
 
 ## Packet Tracer files
 
-NetForge opens `.pkt` and `.pka` files from Packet Tracer 5.0 and later (tested with 8.2.1).
+NetForge opens `.pkt` and `.pka` files from Packet Tracer 5.0 and later (tested with 8.1, 8.2 and 9.0).
 Device positions, names, interfaces, IP settings, IOS running-configs, home-router settings and
 cables are imported. Anything NetForge doesn't model is preserved untouched.
 

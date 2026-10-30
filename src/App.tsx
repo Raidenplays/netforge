@@ -9,6 +9,7 @@ import { importPkt } from './io/pkt';
 import { sampleProject } from './sample';
 import { deleteSelection, duplicate, fitView, runPing, primaryIp } from './actions';
 import { TEMPLATES } from './model/catalog';
+import { ActivityButton, ActivityDialog } from './ui/Activity';
 
 interface Notice {
   title: string;
@@ -51,7 +52,7 @@ export default function App() {
       st.load(o.report.project);
       const n = o.report.project.devices.length;
       st.toast(`Opened ${o.report.project.fileName} · ${n} devices, ${o.report.project.links.length} cables`, 'good');
-      if (o.report.warnings.length) setNotice({ title: 'Imported with notes', body: 'Some parts of this lab are shown but not simulated yet:', items: o.report.warnings });
+      if (o.report.warnings.length) setTimeout(() => st.toast(o.report!.warnings.join(' '), 'info'), 400);
     } else if (o.project) {
       st.load(o.project);
       st.toast(`Opened ${o.project.fileName}`, 'good');
@@ -154,8 +155,9 @@ export default function App() {
       { id: 'open', label: 'Open file…', hint: 'Ctrl O', run: doOpen },
       { id: 'save', label: 'Save', hint: 'Ctrl S', run: () => doSave('auto') },
       { id: 'save-nf', label: 'Save as NetForge project…', run: () => doSave('netforge', true) },
-      ...(project.sourceXml ? [{ id: 'save-pkt', label: 'Save as Packet Tracer .pkt…', run: () => doSave('pkt', true) }] : []),
+      ...(project.sourceXml ? [{ id: 'save-pkt', label: `Save as Packet Tracer .${project.activity ? 'pka' : 'pkt'}…`, run: () => doSave('pkt', true) }] : []),
       { id: 'sample', label: 'Load sample network', run: loadSample },
+      ...(project.activity ? [{ id: 'activity', label: 'Show activity instructions and results', run: () => st.set({ activityOpen: true }) }] : []),
       { id: 'sim', label: `Switch to ${mode === 'realtime' ? 'simulation' : 'realtime'} mode`, hint: 'Ctrl M', run: () => st.set({ mode: mode === 'realtime' ? 'simulation' : 'realtime', flight: null }) },
       { id: 'theme', label: `Use ${theme === 'dark' ? 'light' : 'dark'} theme`, run: () => st.set({ theme: theme === 'dark' ? 'light' : 'dark' }) },
       { id: 'ports', label: 'Toggle port labels', hint: 'L', run: () => st.set({ showPorts: !st.showPorts }) },
@@ -190,9 +192,10 @@ export default function App() {
         </button>
         {ptFile && (
           <button className="btn" onClick={() => doSave('pkt', true)} title="Save back to Packet Tracer format">
-            Export .pkt
+            Export .{project.activity ? 'pka' : 'pkt'}
           </button>
         )}
+        <ActivityButton />
         <div className="sep" />
         <button className="btn icon" disabled={!past.length} onClick={() => useStore.getState().undo()} title="Undo (Ctrl Z)">
           <I.undo size={16} />
@@ -236,6 +239,7 @@ export default function App() {
         <span>{isTauri() ? 'Desktop' : 'Browser preview'}</span>
       </footer>
 
+      <ActivityDialog />
       {palette && <Palette commands={commands} />}
       {notice && (
         <div className="overlay" onPointerDown={() => setNotice(null)}>

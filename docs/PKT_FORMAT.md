@@ -18,6 +18,21 @@ Encoding runs the same steps backwards. Files from before 5.0 skip steps 1–2.
 Rust's `eax` crate only accepts the cipher's default key size (256-bit for Twofish), so the codec
 implements EAX (CTR + OMAC/CMAC) directly on top of `twofish` with a 128-bit key.
 
+Some files carry raw binary inside attributes (for example `ACTIVITY/@VALUE`), which is neither
+valid UTF-8 nor valid XML. `decode_to_string` maps every such byte to U+F700 + byte (and back in
+`encode_str`), so the text is always parseable and round-trips byte-for-byte.
+
+## Activities (`.pka`)
+
+The root is `PACKETTRACER5_ACTIVITY` holding three `PACKETTRACER5` networks. The **last** is the
+student's working network; the first two are the answer and initial networks. Also present:
+
+- `ACTIVITY/INSTRUCTIONS/PAGE*`: instruction pages as HTML (often Word-exported, Windows-1252)
+- `COMPARISONS`: a tree of `NODE` elements (`NAME` with `checkType`, `nodeValue`, `variableName`;
+  `POINTS`). `checkType="2"` marks a graded item; `nodeValue` is the expected value unless
+  `variableName` is set, in which case it's computed from `VARIABLE_MANAGER`.
+- `OVERALL_COMPLETE_FEEDBACK` / `OVERALL_INCOMPLETE_FEEDBACK`: feedback HTML
+
 ## XML layout (the parts NetForge uses)
 
 ```

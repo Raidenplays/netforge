@@ -54,6 +54,7 @@ interface State {
   palette: boolean;
   placing: string | null;
   bottomOpen: boolean;
+  activityOpen: boolean;
 
   mutate: (fn: (p: Project) => void, opts?: { silent?: boolean }) => void;
   load: (p: Project) => void;
@@ -97,6 +98,7 @@ export const useStore = create<State>((set, get) => ({
   palette: false,
   placing: null,
   bottomOpen: true,
+  activityOpen: false,
 
   mutate: (fn, opts) => {
     const before = get().project;
@@ -116,7 +118,7 @@ export const useStore = create<State>((set, get) => ({
     const settled = produce(p, (d) => {
       settleDhcp(d);
     });
-    set({ project: settled, past: [], future: [], dirty: false, selected: null, selectedLink: null, flight: null, log: [] });
+    set({ project: settled, past: [], future: [], dirty: false, selected: null, selectedLink: null, flight: null, log: [], activityOpen: !!settled.activity });
   },
   undo: () => {
     const { past, project, future } = get();
